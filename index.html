@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1c5cff">
+  <meta name="description" content="Escanea documentos con la cámara del celular y guárdalos en PDF, JPG, PNG, Word o texto.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Scaner">
+  <title>Scaner</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+  <!-- Inicio -->
+  <section id="view-home" class="view active">
+    <header class="topbar">
+      <h1>Scaner</h1>
+      <button id="btn-install" class="chip hidden" type="button">Instalar app</button>
+    </header>
+    <main class="home-main">
+      <div id="doc-list" class="doc-list"></div>
+      <div id="empty" class="empty hidden">
+        <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M18 8h20l12 12v34a2 2 0 0 1-2 2H18a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2z" fill="none" stroke="currentColor" stroke-width="3"/><path d="M38 8v12h12M23 32h18M23 40h18M23 48h12" stroke="currentColor" stroke-width="3" fill="none"/></svg>
+        <p>Aún no tienes escaneos.<br>Toca <b>Escanear</b> para empezar.</p>
+      </div>
+      <label class="setting">
+        <input type="checkbox" id="opt-autostart">
+        <span>Abrir la cámara al iniciar la app</span>
+      </label>
+    </main>
+    <div class="home-actions">
+      <button id="btn-import-home" class="btn secondary" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z M4 15l5-5 4 4 3-3 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+        Galería
+      </button>
+      <button id="btn-scan-home" class="btn primary big" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg>
+        Escanear
+      </button>
+    </div>
+  </section>
+
+  <!-- Cámara -->
+  <section id="view-camera" class="view camera">
+    <div class="cam-stage">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="overlay"></canvas>
+      <div id="cam-error" class="cam-error hidden">
+        <p>No se pudo abrir la cámara dentro de la app.</p>
+        <button id="btn-native-cam" class="btn primary" type="button">Usar la cámara del teléfono</button>
+      </div>
+      <div id="flash-fx" class="flash-fx"></div>
+    </div>
+    <div class="cam-top">
+      <button id="btn-cam-close" class="icon-btn" type="button" aria-label="Cerrar">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+      </button>
+      <div class="cam-toggles">
+        <button id="btn-auto" class="chip dark" type="button" aria-pressed="false">Auto: NO</button>
+        <button id="btn-torch" class="chip dark hidden" type="button" aria-pressed="false">Flash: NO</button>
+      </div>
+    </div>
+    <div class="cam-bottom">
+      <button id="btn-cam-thumb" class="cam-thumb" type="button" aria-label="Ver páginas">
+        <img id="cam-thumb-img" alt="">
+        <span id="cam-count" class="badge hidden">0</span>
+      </button>
+      <button id="btn-shutter" class="shutter" type="button" aria-label="Tomar foto"><span></span></button>
+      <button id="btn-cam-done" class="btn primary" type="button">Listo</button>
+    </div>
+    <p id="cam-hint" class="cam-hint">Apunta al documento</p>
+  </section>
+
+  <!-- Documento -->
+  <section id="view-doc" class="view">
+    <header class="topbar">
+      <button id="btn-doc-back" class="icon-btn" type="button" aria-label="Volver">
+        <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <input id="doc-title" class="title-input" aria-label="Nombre del documento">
+      <button id="btn-doc-delete" class="icon-btn" type="button" aria-label="Eliminar documento">
+        <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+      </button>
+    </header>
+    <p id="doc-info" class="doc-info"></p>
+    <main id="page-grid" class="page-grid"></main>
+    <div class="doc-actions">
+      <button id="btn-doc-cam" class="btn secondary" type="button">+ Cámara</button>
+      <button id="btn-doc-import" class="btn secondary" type="button">+ Galería</button>
+      <button id="btn-doc-export" class="btn primary" type="button">Guardar / Compartir</button>
+    </div>
+  </section>
+
+  <!-- Editor de página -->
+  <section id="view-edit" class="view edit">
+    <header class="topbar dark">
+      <button id="btn-edit-back" class="icon-btn" type="button" aria-label="Volver">
+        <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <span id="edit-title" class="edit-title">Página</span>
+      <button id="btn-page-delete" class="icon-btn" type="button" aria-label="Eliminar página">
+        <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+      </button>
+    </header>
+    <div id="edit-stage" class="edit-stage">
+      <img id="edit-result" alt="Resultado">
+      <canvas id="crop-canvas" class="hidden"></canvas>
+      <div id="edit-busy" class="spinner hidden"></div>
+    </div>
+    <div id="edit-tools" class="edit-tools">
+      <div class="filters" id="filters">
+        <button data-filter="doc" type="button">Documento</button>
+        <button data-filter="enhance" type="button">Color</button>
+        <button data-filter="gray" type="button">Gris</button>
+        <button data-filter="bw" type="button">B/N</button>
+        <button data-filter="original" type="button">Original</button>
+      </div>
+      <div class="tool-row">
+        <button id="btn-rot-l" class="tool" type="button">⟲<small>Girar</small></button>
+        <button id="btn-crop" class="tool" type="button">⌗<small>Recortar</small></button>
+        <button id="btn-rot-r" class="tool" type="button">⟳<small>Girar</small></button>
+        <button id="btn-move-l" class="tool" type="button">◀<small>Mover</small></button>
+        <button id="btn-move-r" class="tool" type="button">▶<small>Mover</small></button>
+      </div>
+    </div>
+    <div id="crop-tools" class="edit-tools hidden">
+      <p class="crop-hint">Arrastra las esquinas azules hasta los bordes de la hoja</p>
+      <div class="tool-row">
+        <button id="btn-crop-auto" class="btn secondary dark" type="button">Detectar</button>
+        <button id="btn-crop-full" class="btn secondary dark" type="button">Toda la foto</button>
+        <button id="btn-crop-ok" class="btn primary" type="button">Aplicar</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Hoja de exportación -->
+  <div id="sheet-export" class="sheet-backdrop hidden">
+    <div class="sheet" role="dialog" aria-labelledby="export-title">
+      <h2 id="export-title">Guardar como</h2>
+      <div class="formats" id="formats">
+        <button data-fmt="pdf" type="button" class="selected"><b>PDF</b><small>Todas las páginas</small></button>
+        <button data-fmt="jpg" type="button"><b>JPG</b><small>Imagen</small></button>
+        <button data-fmt="png" type="button"><b>PNG</b><small>Sin pérdida</small></button>
+        <button data-fmt="webp" type="button"><b>WEBP</b><small>Liviano</small></button>
+        <button data-fmt="docx" type="button"><b>Word</b><small>Texto (OCR)</small></button>
+        <button data-fmt="txt" type="button"><b>TXT</b><small>Texto (OCR)</small></button>
+      </div>
+      <div class="opt-row" id="opt-size">
+        <span>Tamaño de hoja</span>
+        <select id="sel-size">
+          <option value="auto">Automático</option>
+          <option value="carta">Carta</option>
+          <option value="a4">A4</option>
+          <option value="oficio">Oficio (8.5×14)</option>
+        </select>
+      </div>
+      <div class="opt-row" id="opt-quality">
+        <span>Calidad</span>
+        <select id="sel-quality">
+          <option value="alta">Alta</option>
+          <option value="media">Media (más liviano)</option>
+          <option value="baja">Baja (para WhatsApp/correo)</option>
+        </select>
+      </div>
+      <p id="export-note" class="export-note"></p>
+      <div id="export-progress" class="progress hidden"><div></div><span></span></div>
+      <div class="sheet-actions">
+        <button id="btn-export-cancel" class="btn secondary" type="button">Cancelar</button>
+        <button id="btn-export-download" class="btn secondary" type="button">Descargar</button>
+        <button id="btn-export-share" class="btn primary" type="button">Compartir</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <input id="file-input" type="file" accept="image/*" multiple hidden>
+  <input id="native-cam-input" type="file" accept="image/*" capture="environment" hidden>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
