@@ -1,5 +1,5 @@
 // Service worker: permite usar la app sin conexión y abrirla al instante.
-const VERSION = 'scaner-v1';
+const VERSION = 'scaner-v2';
 const APP_SHELL = [
   './',
   'index.html',
@@ -8,6 +8,7 @@ const APP_SHELL = [
   'js/db.js',
   'js/export.js',
   'js/imgproc.js',
+  'js/ocr.js',
   'js/worker.js',
   'manifest.webmanifest',
   'icons/icon.svg',
@@ -17,13 +18,21 @@ const APP_SHELL = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSION).then(c => c.addAll(APP_SHELL)).then(() => self.skipWaiting()));
+  // cache: 'reload' evita copiar archivos viejos de la caché HTTP al actualizar.
+  e.waitUntil(caches.open(VERSION)
+    .then(c => c.addAll(APP_SHELL.map(u => new Request(u, { cache: 'reload' }))))
+    .then(() => self.skipWaiting()));
 });
+
+// Archivos del lector de texto de la versión en uso (los demás se borran al actualizar).
+const CDN_CURRENT = /tesseract\.js(-core)?@v?7\.0\.0\//;
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
       .then(keys => Promise.all(keys.filter(k => k !== VERSION && k !== 'scaner-cdn').map(k => caches.delete(k))))
+      .then(() => caches.open('scaner-cdn'))
+      .then(cdn => cdn.keys().then(reqs => Promise.all(reqs.filter(r => !CDN_CURRENT.test(r.url)).map(r => cdn.delete(r)))))
       .then(() => self.clients.claim())
   );
 });
@@ -33,13 +42,15 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
 
-  // Librería de OCR (se descarga una vez y queda guardada).
-  if (url.hostname === 'cdn.jsdelivr.net') {
+  // Lector de texto (Tesseract, versión fija): el motor se descarga una vez y queda guardado.
+  // Se pide siempre con CORS para poder comprobar que la respuesta es válida antes de guardarla.
+  // Los idiomas no se guardan aquí: Tesseract ya los guarda en su propia base de datos.
+  if (url.hostname === 'cdn.jsdelivr.net' && CDN_CURRENT.test(url.pathname)) {
     e.respondWith(caches.open('scaner-cdn').then(async cache => {
-      const hit = await cache.match(req);
+      const hit = await cache.match(url.href);
       if (hit) return hit;
-      const res = await fetch(req);
-      if (res.ok) cache.put(req, res.clone());
+      const res = await fetch(url.href, { mode: 'cors', credentials: 'omit' });
+      if (res.ok) cache.put(url.href, res.clone()).catch(() => {});
       return res;
     }));
     return;

@@ -1,5 +1,6 @@
-// Exportación a PDF, imágenes (JPG/PNG/WEBP), ZIP, texto (OCR) y Word (.docx).
+// Exportación a PDF (con texto buscable opcional), imágenes (JPG/PNG/WEBP), ZIP, TXT y Word (.docx).
 // PDF y ZIP se generan aquí mismo, sin librerías externas, para que funcione sin conexión.
+import { ocrText } from './ocr.js';
 
 const enc = new TextEncoder();
 
@@ -49,7 +50,77 @@ export async function renderPage(page, type, quality) {
 
 // ---------- PDF ----------
 
-export async function buildPdf(pages, { size = 'auto', quality = 'alta', title = '' } = {}, onProgress) {
+// Capa de texto invisible (PDF buscable). Fuente estándar Courier con codificación WinAnsi: todas
+// sus letras miden 0,6 em y cualquier lector de PDF la convierte a Unicode para buscar y copiar.
+// Cada palabra se estira (Tz) para cubrir justo su lugar en la imagen; "3 Tr" la hace invisible.
+const WIN_ANSI = {
+  '€': 0x80, '‚': 0x82, 'ƒ': 0x83, '„': 0x84, '…': 0x85, '†': 0x86, '‡': 0x87, 'ˆ': 0x88, '‰': 0x89,
+  'Š': 0x8A, '‹': 0x8B, 'Œ': 0x8C, 'Ž': 0x8E, '‘': 0x91, '’': 0x92, '“': 0x93, '”': 0x94, '•': 0x95,
+  '–': 0x96, '—': 0x97, '˜': 0x98, '™': 0x99, 'š': 0x9A, '›': 0x9B, 'œ': 0x9C, 'ž': 0x9E, 'Ÿ': 0x9F,
+};
+const isLatin1 = (c) => (c >= 0x20 && c <= 0x7E) || (c >= 0xA0 && c <= 0xFF);
+
+export function winAnsi(str) {
+  const out = [];
+  for (const ch of str.normalize('NFC')) {
+    const c = ch.codePointAt(0);
+    if (isLatin1(c)) out.push(c);
+    else if (WIN_ANSI[ch]) out.push(WIN_ANSI[ch]);
+    else {
+      // Letras fuera de WinAnsi: sin tilde si existe (ő → o); si no, "?".
+      for (const b of ch.normalize('NFKD').replace(/[\u0300-\u036f]/g, '')) {
+        const d = b.codePointAt(0);
+        out.push(isLatin1(d) ? d : 0x3F);
+      }
+    }
+  }
+  return out;
+}
+
+const hex = (bytes) => bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+const num = (x) => String(Math.round(x * 100) / 100);
+
+// Operadores de la capa de texto para una página dibujada en (dx, dy, dw, dh) puntos.
+export function textLayer(ocr, dx, dy, dw, dh) {
+  const ops = ['BT', '3 Tr'];
+  let size = -1;
+  for (const para of ocr.paras) {
+    for (const line of para.lines) {
+      const fs = Math.max(1, line.rh * dh);
+      const [bx0, by0, bx1, by1] = line.bl ||
+        [line.box[0], line.box[3] - line.desc, line.box[2], line.box[3] - line.desc];
+      const slope = bx1 > bx0 ? (by1 - by0) / (bx1 - bx0) : 0;
+      const ang = Math.atan2(-(by1 - by0) * dh, (bx1 - bx0) * dw || 1);
+      const cos = Math.cos(ang), sin = Math.sin(ang);
+      if (fs !== size) { ops.push(`/F1 ${num(fs)} Tf`); size = fs; }
+      line.words.forEach((wd, i) => {
+        const last = i === line.words.length - 1;
+        // El espacio final (salvo en la última palabra) llena el hueco hasta la siguiente,
+        // así al copiar salen las palabras separadas y la selección es continua.
+        const bytes = winAnsi(last ? wd.t : wd.t + ' ');
+        if (!bytes.length) return;
+        const end = last ? wd.b[2] : Math.max(line.words[i + 1].b[0], wd.b[2]);
+        const width = Math.max(0.5, (end - wd.b[0]) * dw / Math.max(0.2, cos));
+        const tz = 100 * width / (bytes.length * 0.6 * fs);
+        const yBase = by0 + slope * (wd.b[0] - bx0);
+        ops.push(`${num(tz)} Tz ${cos.toFixed(4)} ${sin.toFixed(4)} ${(-sin).toFixed(4)} ${cos.toFixed(4)} ` +
+          `${num(dx + wd.b[0] * dw)} ${num(dy + (1 - yBase) * dh)} Tm <${hex(bytes)}> Tj`);
+      });
+    }
+  }
+  ops.push('ET');
+  return ops.join('\n');
+}
+
+// Texto del PDF (título) en UTF-16 para admitir tildes y eñes.
+function pdfString(s) {
+  let h = 'FEFF';
+  for (let i = 0; i < s.length; i++) h += s.charCodeAt(i).toString(16).padStart(4, '0');
+  return `<${h.toUpperCase()}>`;
+}
+
+// pages: con .processed (JPEG) y, si textLayer, .ocr (texto con posiciones).
+export async function buildPdf(pages, { size = 'auto', quality = 'alta', title = '', textLayer: withText = false } = {}, onProgress) {
   const parts = [];
   const offsets = [];
   let length = 0;
@@ -67,12 +138,12 @@ export async function buildPdf(pages, { size = 'auto', quality = 'alta', title =
 
   push('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n');
   const n = pages.length;
-  const pageObj = i => 4 + i * 3;
+  const pageObj = i => 5 + i * 3;
   const kids = pages.map((_, i) => `${pageObj(i)} 0 R`).join(' ');
   obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
   obj(2, `<< /Type /Pages /Kids [${kids}] /Count ${n} >>`);
-  const esc = s => s.replace(/[\\()]/g, m => '\\' + m).replace(/[^\x20-\x7E]/g, '');
-  obj(3, `<< /Title (${esc(title)}) /Producer (Scaner) >>`);
+  obj(3, `<< /Title ${pdfString(title)} /Producer (Scaner) >>`);
+  obj(4, '<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>');
 
   for (let i = 0; i < n; i++) {
     const { blob, width, height } = await renderPage(pages[i], 'image/jpeg', quality);
@@ -89,10 +160,17 @@ export async function buildPdf(pages, { size = 'auto', quality = 'alta', title =
     const scale = Math.min(pw / width, ph / height);
     const dw = width * scale, dh = height * scale;
     const dx = (pw - dw) / 2, dy = (ph - dh) / 2;
-    const content = `q ${dw.toFixed(2)} 0 0 ${dh.toFixed(2)} ${dx.toFixed(2)} ${dy.toFixed(2)} cm /Im0 Do Q`;
+    let content = `q ${dw.toFixed(2)} 0 0 ${dh.toFixed(2)} ${dx.toFixed(2)} ${dy.toFixed(2)} cm /Im0 Do Q`;
+    const ocr = withText && pages[i].ocr;
+    if (ocr && ocr.words) {
+      // Si el texto se leyó con la página girada (rot), se dibuja en ese marco y se gira de vuelta.
+      const k = ocr.rot || 0;
+      const cm = [[1, 0, 0, 1, dx, dy], [0, 1, -1, 0, dx + dw, dy], [-1, 0, 0, -1, dx + dw, dy + dh], [0, -1, 1, 0, dx, dy + dh]][k];
+      content += `\nq ${cm.map(num).join(' ')} cm\n` + textLayer(ocr, 0, 0, k % 2 ? dh : dw, k % 2 ? dw : dh) + '\nQ';
+    }
     const p = pageObj(i);
     obj(p, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pw.toFixed(2)} ${ph.toFixed(2)}] ` +
-      `/Resources << /XObject << /Im0 ${p + 2} 0 R >> >> /Contents ${p + 1} 0 R >>`);
+      `/Resources << /XObject << /Im0 ${p + 2} 0 R >> /Font << /F1 4 0 R >> >> /Contents ${p + 1} 0 R >>`);
     obj(p + 1, [`<< /Length ${content.length} >>\nstream\n`, content, '\nendstream']);
     obj(p + 2, [`<< /Type /XObject /Subtype /Image /Width ${width} /Height ${height} ` +
       `/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`,
@@ -100,7 +178,7 @@ export async function buildPdf(pages, { size = 'auto', quality = 'alta', title =
     onProgress && onProgress((i + 1) / n);
   }
 
-  const total = 4 + n * 3;
+  const total = 5 + n * 3;
   const xref = length;
   let table = `xref\n0 ${total}\n0000000000 65535 f \n`;
   for (let i = 1; i < total; i++) table += String(offsets[i]).padStart(10, '0') + ' 00000 n \n';
@@ -181,57 +259,28 @@ export async function buildZip(files, type = 'application/zip') {
   return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type });
 }
 
-// ---------- OCR (Tesseract.js, se descarga solo cuando se usa) ----------
+// ---------- Texto (TXT / Word) a partir del OCR guardado en cada página ----------
 
-let tesseractLoading;
-function loadTesseract() {
-  if (window.Tesseract) return Promise.resolve(window.Tesseract);
-  if (!tesseractLoading) {
-    tesseractLoading = new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
-      s.onload = () => resolve(window.Tesseract);
-      s.onerror = () => { tesseractLoading = null; reject(new Error('Se necesita internet la primera vez para el reconocimiento de texto')); };
-      document.head.appendChild(s);
-    });
-  }
-  return tesseractLoading;
-}
-
-export async function ocrPages(pages, onProgress) {
-  const Tesseract = await loadTesseract();
-  let current = 0;
-  const worker = await Tesseract.createWorker('spa+eng', 1, {
-    logger: m => {
-      if (m.status === 'recognizing text') onProgress && onProgress((current + m.progress) / pages.length, 'Leyendo texto');
-      else onProgress && onProgress(current / pages.length, 'Preparando lector de texto');
-    },
-  });
-  const texts = [];
-  try {
-    for (current = 0; current < pages.length; current++) {
-      const { data } = await worker.recognize(pages[current].processed);
-      texts.push(data.text.trim());
-    }
-  } finally {
-    await worker.terminate();
-  }
-  return texts;
-}
-
-export function buildTxt(texts) {
+export function buildTxt(pages) {
+  const texts = pages.map(p => ocrText(p.ocr));
   const body = texts.length > 1
     ? texts.map((t, i) => `--- Página ${i + 1} ---\n${t}`).join('\n\n')
     : texts[0] || '';
   return new Blob([body + '\n'], { type: 'text/plain;charset=utf-8' });
 }
 
-export function buildDocx(texts, title) {
+export function buildDocx(pages, title) {
   const x = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
-  const para = t => `<w:p><w:r><w:t xml:space="preserve">${x(t)}</w:t></w:r></w:p>`;
+  const run = t => `<w:r><w:t xml:space="preserve">${x(t)}</w:t></w:r>`;
+  // Cada párrafo del OCR es un párrafo de Word; sus renglones se separan con saltos de línea.
+  const para = lines => '<w:p><w:pPr><w:spacing w:after="160"/></w:pPr>' +
+    lines.map(run).join('<w:r><w:br/></w:r>') + '</w:p>';
   const pageBreak = '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
-  const body = texts.map(t => t.split('\n').map(para).join('')).join(pageBreak);
+  const body = pages.map(p => {
+    const paras = (p.ocr ? p.ocr.paras : []).map(pr => pr.lines.map(l => l.words.map(w => w.t).join(' ')));
+    return paras.length ? paras.map(para).join('') : '<w:p/>';
+  }).join(pageBreak);
   const documentXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
     body + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' +

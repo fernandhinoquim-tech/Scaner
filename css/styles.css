@@ -236,6 +236,10 @@ svg { width: 22px; height: 22px; flex: none; }
   border: 1px solid var(--line); background: var(--bg); color: var(--text);
   padding: 10px; border-radius: 10px; max-width: 60%;
 }
+.opt-row.check { cursor: pointer; }
+.opt-row.check span { display: flex; flex-direction: column; gap: 2px; }
+.opt-row.check small { color: var(--muted); font-size: 12px; }
+.opt-row.check input { width: 22px; height: 22px; flex: none; accent-color: var(--primary); }
 .export-note { color: var(--muted); font-size: 13px; min-height: 1em; margin: 12px 2px 4px; }
 .progress { position: relative; height: 26px; border-radius: 8px; background: var(--bg); overflow: hidden; margin: 8px 0; }
 .progress div { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--primary); transition: width 0.2s; }

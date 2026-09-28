@@ -1,6 +1,10 @@
 import * as db from './db.js';
-import { detectDocument, FULL_FRAME, polyArea, orderCorners, warp, applyFilter, rotate } from './imgproc.js';
+import {
+  detectDocument, FULL_FRAME, polyArea, orderCorners, warp, applyFilter, rotate, prepareForOcr, OCR_MAX_SIDE,
+  rotateGray, inkBand,
+} from './imgproc.js';
 import * as ex from './export.js';
+import * as ocr from './ocr.js';
 
 const $ = (id) => document.getElementById(id);
 const MAX_ORIGINAL = 3200;   // lado máximo de la foto original guardada
@@ -106,17 +110,31 @@ try {
   };
 } catch { worker = null; }
 
+function workerJob(msg) {
+  return new Promise((resolve, reject) => {
+    const id = ++jobSeq;
+    jobs.set(id, { resolve, reject });
+    worker.postMessage({ id, ...msg });
+  });
+}
+
 async function runProcess(image, corners, filter, rotation) {
   if (worker) {
     try {
-      return await new Promise((resolve, reject) => {
-        const id = ++jobSeq;
-        jobs.set(id, { resolve, reject });
-        worker.postMessage({ id, image, corners, filter, rotation, maxSide: MAX_OUTPUT });
-      });
+      return await workerJob({ image, corners, filter, rotation, maxSide: MAX_OUTPUT });
     } catch { /* se procesa en el hilo principal */ }
   }
   return rotate(applyFilter(warp(image, corners, MAX_OUTPUT), filter), rotation);
+}
+
+// Imagen para el OCR: gris con sombras aplanadas, a la máxima resolución disponible.
+async function runOcrPrep(image, corners, rotation) {
+  if (worker) {
+    try {
+      return await workerJob({ type: 'ocr', image, corners, rotation });
+    } catch { /* se procesa en el hilo principal */ }
+  }
+  return prepareForOcr(rotate(warp(image, corners, OCR_MAX_SIDE), rotation));
 }
 
 // Genera la imagen final y la miniatura de una página.
@@ -813,18 +831,88 @@ $('btn-crop-ok').addEventListener('click', async () => {
   await reprocess();
 });
 
+// ---------------- Texto (OCR) ----------------
+
+// El texto leído se guarda con la página y solo se vuelve a leer si cambian el recorte o el giro.
+const ocrKey = (page) => `${ocr.OCR_REVISION}|${page.rotation}|` +
+  page.corners.map(p => p.map(v => v.toFixed(4)).join(',')).join(';');
+const hasOcr = (page) => !!(page.ocr && page.ocr.key === ocrKey(page));
+
+// Imagen para el lector en formato PGM (gris sin compresión: se lee rapidísimo).
+const pgm = (g) => new Blob([new TextEncoder().encode(`P5\n${g.width} ${g.height}\n255\n`), g.data]);
+
+async function ocrImage(page) {
+  const bmp = await decodeBlob(page.original);
+  const data = getData(drawScaled(bmp, page.ow, page.oh, MAX_ORIGINAL));
+  bmp.close && bmp.close();
+  return runOcrPrep(data, page.corners, page.rotation);
+}
+
+// Lee una página en el giro correcto. Si el texto sale con poca confianza, quizá la página está
+// de lado o al revés: se prueban los otros giros en una banda de la página (más rápido) y, si uno
+// se lee claramente mejor, se relee completa así. El giro usado se guarda (rot) para ubicar el
+// texto sobre la imagen en el PDF.
+async function readPage(gray, step) {
+  const res = await ocr.recognize(pgm(gray), gray.width, gray.height, step);
+  store.set('ocrReady', true);
+  const { raw } = res;
+  if (raw.words < 3 || raw.conf >= 70) return res;
+  step(1, 'Revisando orientación');
+  // Al revés, el lector aún encuentra palabras con letras; de lado, casi solo símbolos sueltos.
+  let best = 0, bestConf = raw.conf;
+  for (const k of raw.lettered < 0.25 ? [1, 3, 2] : [2, 1, 3]) {
+    const band = rotateGray(inkBand(gray, k % 2 === 1), k);
+    const r = await ocr.recognize(pgm(band), band.width, band.height, null);
+    const conf = r.raw.words >= 3 ? r.raw.conf : 0;
+    if (conf > bestConf) { best = k; bestConf = conf; }
+    if (conf >= 80) break; // se lee claramente bien así: no hace falta probar más
+  }
+  if (!best || bestConf < raw.conf + 15) return res;
+  const turned = rotateGray(gray, best);
+  const res2 = await ocr.recognize(pgm(turned), turned.width, turned.height,
+    (f) => step(f, 'Leyendo texto (página girada)'));
+  return res2.raw.conf > raw.conf + 10 ? { ...res2, rot: best } : res;
+}
+
+async function ensureOcr(pages, onProgress, stopped) {
+  const todo = pages.filter(p => !hasOcr(p));
+  for (let i = 0; i < todo.length; i++) {
+    const page = todo[i];
+    const suffix = pages.length > 1 ? ` · página ${pages.indexOf(page) + 1} de ${pages.length}` : '';
+    let done = 0; // la barra no retrocede si la página se relee girada
+    const step = (f, label) => { done = Math.max(done, f); onProgress((i + done) / todo.length, label + suffix); };
+    if (stopped()) throw new ocr.OcrCancelledError('Cancelado');
+    step(0, 'Preparando imagen');
+    const gray = await ocrImage(page);
+    if (stopped()) throw new ocr.OcrCancelledError('Cancelado');
+    page.ocr = { ...await readPage(gray, step), key: ocrKey(page) };
+    await db.putPage(page);
+  }
+}
+
+// Avisos tras leer: páginas con poca confianza (foto borrosa u oscura) y páginas giradas.
+function ocrNotice(pages) {
+  const list = (nums) => `${nums.length > 1 ? 'las páginas' : 'la página'} ${nums.join(', ')}`;
+  const bad = pages.map((p, i) => (p.ocr && p.ocr.words && p.ocr.conf < 60 ? i + 1 : 0)).filter(Boolean);
+  const turned = pages.map((p, i) => (p.ocr && p.ocr.rot ? i + 1 : 0)).filter(Boolean);
+  const msgs = [];
+  if (bad.length) msgs.push(`Revisa ${list(bad)}: el texto puede tener errores (foto borrosa u oscura).`);
+  if (turned.length) msgs.push(`${list(turned)[0].toUpperCase()}${list(turned).slice(1)} ${turned.length > 1 ? 'están giradas' : 'está girada'}; el texto se leyó bien, pero puedes enderezarla${turned.length > 1 ? 's' : ''} con Girar.`);
+  return msgs.join(' ');
+}
+
 // ---------------- Exportar ----------------
 
-const exp = { fmt: store.get('fmt', 'pdf'), prepared: null, busy: false };
+const exp = { fmt: store.get('fmt', 'pdf'), prepared: null, busy: false, stop: false, notice: '' };
 
 function openExport() {
   if (!state.pages.length) return;
   exp.prepared = null;
   $('sel-size').value = store.get('size', 'auto');
   $('sel-quality').value = store.get('quality', 'alta');
+  $('opt-ocr').checked = store.get('pdfOcr', true);
   selectFormat(exp.fmt);
   $('export-progress').classList.add('hidden');
-  $('btn-export-share').textContent = 'Compartir';
   setExportBusy(false);
   $('sheet-export').classList.remove('hidden');
 }
@@ -842,12 +930,17 @@ function selectFormat(fmt) {
   const isImg = ['jpg', 'png', 'webp'].includes(fmt);
   const isText = fmt === 'txt' || fmt === 'docx';
   $('opt-size').classList.toggle('hidden', fmt !== 'pdf');
+  $('opt-ocr-row').classList.toggle('hidden', fmt !== 'pdf');
   $('opt-quality').classList.toggle('hidden', isText);
   const n = state.pages.length;
+  const firstTime = store.get('ocrReady', false) ? '' : ' La primera vez descarga el lector de texto (unos 9 MB).';
   let note = '';
   if (isImg && n > 1) note = `Se generarán ${n} imágenes. Al descargar se guardan juntas en un archivo .zip.`;
-  if (isText) note = 'Reconoce el texto de las páginas (español e inglés). La primera vez necesita internet para descargar el lector.';
-  if (fmt === 'pdf') note = `Un solo PDF con ${n} ${n === 1 ? 'página' : 'páginas'}.`;
+  if (isText) note = 'Reconoce el texto de las páginas (español e inglés).' + firstTime;
+  if (fmt === 'pdf') {
+    note = `Un solo PDF con ${n} ${n === 1 ? 'página' : 'páginas'}.`;
+    if ($('opt-ocr').checked) note += ' Con texto buscable: podrás buscar y copiar palabras.' + firstTime;
+  }
   $('export-note').textContent = note;
 }
 
@@ -857,12 +950,23 @@ $('formats').addEventListener('click', (e) => {
 });
 $('sel-size').addEventListener('change', (e) => { store.set('size', e.target.value); exp.prepared = null; });
 $('sel-quality').addEventListener('change', (e) => { store.set('quality', e.target.value); exp.prepared = null; });
-$('btn-export-cancel').addEventListener('click', () => { if (!exp.busy) closeExport(); });
+$('opt-ocr').addEventListener('change', (e) => { store.set('pdfOcr', e.target.checked); selectFormat(exp.fmt); });
+$('btn-export-cancel').addEventListener('click', () => {
+  if (!exp.busy) return closeExport();
+  // Detener lo que se está preparando (por ejemplo, la lectura de texto).
+  exp.stop = true;
+  ocr.cancel();
+  $('btn-export-cancel').disabled = true;
+});
 $('sheet-export').addEventListener('click', (e) => { if (e.target === e.currentTarget && !exp.busy) closeExport(); });
 
 function setExportBusy(on) {
   exp.busy = on;
-  ['btn-export-share', 'btn-export-download', 'btn-export-cancel'].forEach(id => { $(id).disabled = on; });
+  $('btn-export-share').disabled = on;
+  $('btn-export-download').disabled = on;
+  $('btn-export-cancel').disabled = false;
+  $('btn-export-cancel').textContent = on ? 'Detener' : 'Cancelar';
+  document.querySelectorAll('#formats button, #sel-size, #sel-quality, #opt-ocr').forEach(el => { el.disabled = on; });
 }
 
 function progress(frac, label) {
@@ -872,22 +976,44 @@ function progress(frac, label) {
   p.querySelector('span').textContent = `${label || 'Preparando'} ${Math.round(frac * 100)}%`;
 }
 
+const checkStop = () => { if (exp.stop) throw new ocr.OcrCancelledError('Cancelado'); };
+
 // Devuelve la lista de archivos a entregar: [{name, blob}]
 async function buildFiles() {
   const pages = state.pages.filter(p => p.processed);
   if (pages.length < state.pages.length) throw new Error('Espera a que terminen de procesarse las páginas');
   const base = safeName(state.doc.name);
   const quality = $('sel-quality').value;
+  const stopped = () => exp.stop;
+  exp.notice = '';
   switch (exp.fmt) {
     case 'pdf': {
-      const blob = await ex.buildPdf(pages, { size: $('sel-size').value, quality, title: state.doc.name },
-        f => progress(f, 'Creando PDF'));
+      const withText = $('opt-ocr').checked;
+      if (withText) {
+        try {
+          await ensureOcr(pages, (f, label) => progress(f * 0.9, label), stopped);
+          exp.notice = ocrNotice(pages);
+        } catch (err) {
+          if (exp.stop || err instanceof ocr.OcrCancelledError) throw err;
+          // Sin lector (p. ej. sin internet): el PDF se guarda igual, con texto donde ya se había leído.
+          console.warn(err);
+          const missing = pages.filter(p => !hasOcr(p)).length;
+          exp.notice = (missing === pages.length ? 'El PDF se guardó sin texto buscable. '
+            : `${missing} de ${pages.length} páginas quedaron sin texto buscable. `) + err.message;
+        }
+      }
+      // Solo se usa el texto leído con el recorte y giro actuales de cada página.
+      const pdfPages = pages.map(p => ({ ...p, ocr: withText && hasOcr(p) ? p.ocr : null }));
+      const start = withText ? 0.9 : 0;
+      const blob = await ex.buildPdf(pdfPages, { size: $('sel-size').value, quality, title: state.doc.name, textLayer: withText },
+        f => { checkStop(); progress(start + f * (1 - start), 'Creando PDF'); });
       return [{ name: base + '.pdf', blob }];
     }
     case 'jpg': case 'png': case 'webp': {
       const type = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[exp.fmt];
       const files = [];
       for (let i = 0; i < pages.length; i++) {
+        checkStop();
         progress(i / pages.length, 'Creando imágenes');
         const { blob } = await ex.renderPage(pages[i], type, quality);
         const suffix = pages.length > 1 ? `_${String(i + 1).padStart(2, '0')}` : '';
@@ -897,8 +1023,9 @@ async function buildFiles() {
       return files;
     }
     case 'txt': case 'docx': {
-      const texts = await ex.ocrPages(pages, (f, label) => progress(f, label));
-      const blob = exp.fmt === 'txt' ? ex.buildTxt(texts) : await ex.buildDocx(texts, state.doc.name);
+      await ensureOcr(pages, (f, label) => progress(f, label), stopped);
+      exp.notice = ocrNotice(pages);
+      const blob = exp.fmt === 'txt' ? ex.buildTxt(pages) : await ex.buildDocx(pages, state.doc.name);
       return [{ name: `${base}.${exp.fmt}`, blob }];
     }
   }
@@ -907,14 +1034,26 @@ async function buildFiles() {
 
 async function prepare() {
   if (exp.prepared) return exp.prepared;
+  exp.stop = false;
   setExportBusy(true);
   try {
     progress(0);
-    exp.prepared = await buildFiles();
-    return exp.prepared;
+    const files = await buildFiles();
+    checkStop();
+    exp.prepared = files;
+    return files;
+  } catch (err) {
+    $('export-progress').classList.add('hidden');
+    throw err;
   } finally {
     setExportBusy(false);
   }
+}
+
+function exportFailed(err) {
+  if (exp.stop || err instanceof ocr.OcrCancelledError) return toast('Cancelado');
+  console.error(err);
+  toast(err.message, 5000);
 }
 
 function download(name, blob) {
@@ -936,10 +1075,10 @@ $('btn-export-download').addEventListener('click', async () => {
       download(safeName(state.doc.name) + '.zip', zip);
     }
     $('export-progress').classList.add('hidden');
-    toast('Archivo guardado en Descargas');
+    if (exp.notice) toast('Archivo guardado. ' + exp.notice, 8000);
+    else toast('Archivo guardado en Descargas');
   } catch (err) {
-    console.error(err);
-    toast(err.message);
+    exportFailed(err);
   }
 });
 
@@ -948,8 +1087,7 @@ $('btn-export-share').addEventListener('click', async () => {
   try {
     files = await prepare();
   } catch (err) {
-    console.error(err);
-    return toast(err.message);
+    return exportFailed(err);
   }
   const shareFiles = files.map(f => new File([f.blob], f.name, { type: f.blob.type }));
   if (!navigator.canShare || !navigator.canShare({ files: shareFiles })) {
@@ -959,6 +1097,7 @@ $('btn-export-share').addEventListener('click', async () => {
   try {
     await navigator.share({ files: shareFiles, title: state.doc.name });
     closeExport();
+    if (exp.notice) toast(exp.notice, 8000);
   } catch (err) {
     if (err.name === 'NotAllowedError') {
       // El permiso de compartir caducó mientras se preparaba (p. ej. OCR largo): un toque más.

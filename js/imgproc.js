@@ -211,23 +211,270 @@ function candidate(bin, w, h) {
   return { quad, score: qa * fill * fill };
 }
 
-// Detecta el documento en una imagen pequeña. Devuelve 4 esquinas normalizadas (0..1) o null.
-export function detectDocument(img) {
-  const { width: w, height: h } = img;
-  const gray = boxBlur(toGray(img), w, h, 2);
-  const t = otsu(gray);
+// Método 1: la hoja como la mancha clara (u oscura) más grande. Devuelve el cuadrilátero en píxeles.
+function detectByBrightness(gray, w, h) {
+  const g = boxBlur(gray, w, h, 2);
+  const t = otsu(g);
   let best = null;
   for (const bright of [true, false]) {
     let bin = new Uint8Array(w * h);
-    for (let i = 0; i < bin.length; i++) bin[i] = bright ? gray[i] > t : gray[i] <= t;
+    for (let i = 0; i < bin.length; i++) bin[i] = bright ? g[i] > t : g[i] <= t;
     bin = morph(morph(bin, w, h, true), w, h, true);
     bin = morph(morph(bin, w, h, false), w, h, false);
     const c = candidate(bin, w, h);
     if (c && (!best || c.score > best.score)) best = c;
   }
+  return best && best.quad;
+}
+
+// Método 2: bordes rectos. Gradiente (Sobel) + supresión de no-máximos; guarda la dirección
+// del gradiente (grados 0..359, apunta hacia lo más claro) en cada píxel de borde, o -1.
+function edgeMap(gray, w, h) {
+  const n = w * h;
+  const mag = new Float32Array(n), gxs = new Float32Array(n), gys = new Float32Array(n);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const a = gray[i - w - 1], b = gray[i - w], c = gray[i - w + 1];
+      const d = gray[i - 1], f = gray[i + 1];
+      const g = gray[i + w - 1], k = gray[i + w], l = gray[i + w + 1];
+      const gx = (c + 2 * f + l) - (a + 2 * d + g);
+      const gy = (g + 2 * k + l) - (a + 2 * b + c);
+      gxs[i] = gx; gys[i] = gy;
+      mag[i] = Math.sqrt(gx * gx + gy * gy);
+    }
+  }
+  // Umbral relativo al ruido: en las zonas planas el gradiente solo mide ruido.
+  const sample = [];
+  for (let i = 0; i < n; i += 5) sample.push(mag[i]);
+  sample.sort((p, q) => p - q);
+  const thr = Math.max(14, sample[sample.length >> 1] * 3.5);
+  const ang = new Int16Array(n).fill(-1);
+  const pts = [];
+  for (let y = 2; y < h - 2; y++) {
+    for (let x = 2; x < w - 2; x++) {
+      const i = y * w + x, m = mag[i];
+      if (m < thr) continue;
+      const gx = gxs[i], gy = gys[i], ax = Math.abs(gx), ay = Math.abs(gy);
+      const o = ay <= ax * 0.4142 ? 1 : ax <= ay * 0.4142 ? w : (gx > 0) === (gy > 0) ? w + 1 : w - 1;
+      if (m < mag[i - o] || m <= mag[i + o]) continue;
+      let deg = Math.round(Math.atan2(gy, gx) * 180 / Math.PI);
+      if (deg < 0) deg += 360;
+      ang[i] = deg % 360;
+      pts.push(i);
+    }
+  }
+  return { ang, pts };
+}
+
+const DEG = Math.PI / 180;
+const COS = new Float32Array(180), SIN = new Float32Array(180);
+for (let t = 0; t < 180; t++) { COS[t] = Math.cos(t * DEG); SIN[t] = Math.sin(t * DEG); }
+
+const angDiff180 = (a, b) => { const d = Math.abs(a - b) % 180; return d > 90 ? 180 - d : d; };
+const angDiff360 = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
+
+function sameLine(a, b) {
+  let dt = Math.abs(a.t - b.t), rb = b.rho;
+  if (dt > 90) { dt = 180 - dt; rb = -rb; } // cruce 0°/180°: misma recta con ρ de signo opuesto
+  return dt <= 5 && Math.abs(a.rho - rb) <= 8;
+}
+
+// Transformada de Hough dirigida por el gradiente: cada píxel de borde vota solo por
+// rectas casi perpendiculares a su gradiente. Devuelve las rectas más votadas.
+function houghLines({ ang, pts }, w, h, maxLines = 24) {
+  const diag = Math.ceil(Math.hypot(w, h));
+  const NR = diag * 2 + 1;
+  const acc = new Uint16Array(180 * NR);
+  for (const i of pts) {
+    const x = i % w, y = (i - x) / w, t0 = ang[i] % 180;
+    for (let dt = -3; dt <= 3; dt++) {
+      const t = (t0 + dt + 180) % 180;
+      acc[t * NR + Math.round(x * COS[t] + y * SIN[t]) + diag]++;
+    }
+  }
+  const minVotes = Math.max(10, Math.round(Math.min(w, h) * 0.05));
+  const cand = [];
+  for (let t = 0; t < 180; t++) {
+    for (let r = 0; r < NR; r++) {
+      const v = acc[t * NR + r];
+      if (v < minVotes) continue;
+      let isMax = true;
+      for (let dt = -2; dt <= 2 && isMax; dt++) {
+        const tt = t + dt;
+        if (tt < 0 || tt >= 180) continue;
+        for (let dr = -2; dr <= 2; dr++) {
+          const rr = r + dr;
+          if ((!dt && !dr) || rr < 0 || rr >= NR) continue;
+          const u = acc[tt * NR + rr];
+          if (u > v || (u === v && (dt < 0 || (!dt && dr < 0)))) { isMax = false; break; }
+        }
+      }
+      if (isMax) cand.push({ t, rho: r - diag, v });
+    }
+  }
+  cand.sort((a, b) => b.v - a.v);
+  const lines = [];
+  for (const c of cand) {
+    if (lines.some(l => sameLine(l, c))) continue;
+    lines.push({ ...c, c: COS[c.t], s: SIN[c.t] });
+    if (lines.length >= maxLines) break;
+  }
+  return lines;
+}
+
+function intersect(a, b) {
+  const det = a.c * b.s - a.s * b.c;
+  if (Math.abs(det) < 1e-6) return null;
+  return [(a.rho * b.s - a.s * b.rho) / det, (a.c * b.rho - a.rho * b.c) / det];
+}
+
+function validQuad(q, w, h) {
+  const mx = w * 0.03, my = h * 0.03;
+  for (const [x, y] of q) if (!(x >= -mx && x <= w - 1 + mx && y >= -my && y <= h - 1 + my)) return false;
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) % 4], c = q[(i + 2) % 4];
+    const s = Math.sign((b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]));
+    if (!s || (sign && s !== sign)) return false;
+    sign = s;
+  }
+  if (polyArea(q) < w * h * 0.07) return false;
+  const len = i => Math.hypot(q[(i + 1) % 4][0] - q[i][0], q[(i + 1) % 4][1] - q[i][1]);
+  const minSide = Math.min(w, h) * 0.12;
+  for (let i = 0; i < 4; i++) {
+    if (len(i) < minSide) return false;
+    const a = q[i], b = q[(i + 1) % 4], p = q[(i + 3) % 4];
+    const v1x = p[0] - a[0], v1y = p[1] - a[1], v2x = b[0] - a[0], v2y = b[1] - a[1];
+    const cos = (v1x * v2x + v1y * v2y) / (Math.hypot(v1x, v1y) * Math.hypot(v2x, v2y));
+    if (Math.abs(cos) > 0.82) return false; // ángulos interiores entre ~35° y ~145°
+  }
+  const r1 = len(0) / len(2), r2 = len(1) / len(3);
+  return r1 >= 0.5 && r1 <= 2 && r2 >= 0.5 && r2 <= 2;
+}
+
+// Geometría de cada lado: normal hacia afuera y direcciones esperadas del gradiente.
+function sideInfo(q) {
+  const cx = (q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4;
+  const cy = (q[0][1] + q[1][1] + q[2][1] + q[3][1]) / 4;
+  return [0, 1, 2, 3].map(k => {
+    const a = q[k], b = q[(k + 1) % 4];
+    const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy) || 1;
+    let nx = dy / len, ny = -dx / len;
+    if (((a[0] + b[0]) / 2 - cx) * nx + ((a[1] + b[1]) / 2 - cy) * ny < 0) { nx = -nx; ny = -ny; }
+    let out = Math.round(Math.atan2(ny, nx) / DEG);
+    if (out < 0) out += 360;
+    return { a, dx, dy, len, nx, ny, out: out % 360, in: (out + 180) % 360 };
+  });
+}
+
+const OFFS = [0, -1, 1, -2, 2];
+
+// Qué tanto del perímetro coincide con bordes reales de polaridad constante
+// (la hoja suele ser más clara que la mesa, o toda más oscura). Puntaje = 2·apoyo − perímetro.
+// Devuelve null si no puede superar `minScore` (para descartar candidatos rápido).
+function quadSupport(q, { ang }, w, h, minScore = -Infinity) {
+  const sides = sideInfo(q);
+  const steps = sides.map(sd => Math.max(1, Math.floor(sd.len)));
+  const total = steps.reduce((a, n) => a + n + 1, 0);
+  let pos = 0, neg = 0, left = total;
+  for (let k = 0; k < 4; k++) {
+    const sd = sides[k], n = steps[k];
+    for (let s = 0; s <= n; s++) {
+      const px = sd.a[0] + sd.dx * s / n, py = sd.a[1] + sd.dy * s / n;
+      for (const t of OFFS) {
+        const x = Math.round(px + sd.nx * t), y = Math.round(py + sd.ny * t);
+        if (x < 0 || y < 0 || x >= w || y >= h) continue;
+        const g = ang[y * w + x];
+        if (g < 0) continue;
+        if (angDiff360(g, sd.in) <= 20) { pos++; break; }
+        if (angDiff360(g, sd.out) <= 20) { neg++; break; }
+      }
+    }
+    left -= n + 1;
+    if (2 * (Math.max(pos, neg) + left) - total <= minScore) return null;
+  }
+  const S = Math.max(pos, neg);
+  return { S, P: total, score: 2 * S - total, polarity: pos >= neg ? 1 : -1 };
+}
+
+// Ajusta cada lado a los píxeles de borde cercanos (mínimos cuadrados) y lo mete ~1 px hacia adentro.
+function refineQuad(q, { ang }, w, h, polarity) {
+  const lines = sideInfo(q).map(sd => {
+    const want = polarity > 0 ? sd.in : sd.out;
+    const steps = Math.max(1, Math.floor(sd.len));
+    let n = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+    for (let s = Math.ceil(steps * 0.04); s <= steps * 0.96; s++) {
+      const px = sd.a[0] + sd.dx * s / steps, py = sd.a[1] + sd.dy * s / steps;
+      for (const t of [0, -1, 1, -2, 2, -3, 3]) {
+        const x = Math.round(px + sd.nx * t), y = Math.round(py + sd.ny * t);
+        if (x < 0 || y < 0 || x >= w || y >= h) continue;
+        const g = ang[y * w + x];
+        if (g >= 0 && angDiff360(g, want) <= 20) {
+          n++; sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y;
+          break;
+        }
+      }
+    }
+    let c = sd.nx, s = sd.ny, rho = sd.a[0] * sd.nx + sd.a[1] * sd.ny;
+    if (n >= 8) {
+      const mx = sx / n, my = sy / n;
+      const cxx = sxx / n - mx * mx, cyy = syy / n - my * my, cxy = sxy / n - mx * my;
+      // Normal = autovector del menor autovalor de la covarianza.
+      const th = 0.5 * Math.atan2(2 * cxy, cxx - cyy);
+      let ncx = -Math.sin(th), ncy = Math.cos(th);
+      if (ncx * sd.nx + ncy * sd.ny < 0) { ncx = -ncx; ncy = -ncy; }
+      if (ncx * sd.nx + ncy * sd.ny > 0.97) { c = ncx; s = ncy; rho = mx * ncx + my * ncy; }
+    }
+    return { c, s, rho: rho - 1 };
+  });
+  const out = [0, 1, 2, 3].map(k => intersect(lines[(k + 3) % 4], lines[k]));
+  if (out.some(p => !p) || !validQuad(out, w, h)) return q;
+  return out;
+}
+
+// Detecta el documento en una imagen pequeña (~240-400 px). Devuelve 4 esquinas normalizadas (0..1) o null.
+export function detectDocument(img) {
+  const { width: w, height: h } = img;
+  const gray = toGray(img);
+  const edges = edgeMap(boxBlur(boxBlur(gray, w, h, 1), w, h, 1), w, h);
+  const L = houghLines(edges, w, h);
+
+  // Candidatos: dos pares de rectas casi paralelas que se cruzan.
+  const pairs = [];
+  for (let i = 0; i < L.length; i++) {
+    for (let j = i + 1; j < L.length; j++) if (angDiff180(L[i].t, L[j].t) <= 30) pairs.push([i, j]);
+  }
+  const quads = [];
+  for (let p = 0; p < pairs.length; p++) {
+    for (let r = p + 1; r < pairs.length; r++) {
+      const [a, b] = pairs[p], [c, d] = pairs[r];
+      if (a === c || a === d || b === c || b === d) continue;
+      if (Math.min(angDiff180(L[a].t, L[c].t), angDiff180(L[a].t, L[d].t),
+        angDiff180(L[b].t, L[c].t), angDiff180(L[b].t, L[d].t)) < 45) continue;
+      const q = [intersect(L[a], L[c]), intersect(L[a], L[d]), intersect(L[b], L[d]), intersect(L[b], L[c])];
+      if (q.some(pt => !pt) || !validQuad(q, w, h)) continue;
+      quads.push({ q, votes: L[a].v + L[b].v + L[c].v + L[d].v });
+    }
+  }
+  quads.sort((x, y) => y.votes - x.votes);
+
+  // Solo cuentan los candidatos con al menos 60 % del perímetro apoyado en bordes reales.
+  const accepted = (b) => b && b.S >= b.P * 0.6;
+  let best = null;
+  for (const { q } of quads.slice(0, 600)) {
+    const sup = quadSupport(q, edges, w, h, best ? best.score : -Infinity);
+    if (accepted(sup) && (!best || sup.score > best.score)) best = { q, ...sup };
+  }
+  if (!best) {
+    // Respaldo (p. ej. hojas curvas): la mancha clara más grande, validada con el mismo criterio.
+    const bq = detectByBrightness(gray, w, h);
+    const sup = bq && quadSupport(bq, edges, w, h);
+    if (accepted(sup)) best = { q: bq, ...sup };
+  }
   if (!best) return null;
-  // La erosión deja el contorno ~1 px por dentro de la hoja: así no se cuela el fondo.
-  return best.quad.map(([x, y]) => [
+  const quad = orderCorners(refineQuad(best.q, edges, w, h, best.polarity));
+  return quad.map(([x, y]) => [
     Math.min(1, Math.max(0, (x + 0.5) / w)),
     Math.min(1, Math.max(0, (y + 0.5) / h)),
   ]);
@@ -482,6 +729,165 @@ export function rotate(img, turns) {
       else if (turns === 2) { nx = w - 1 - x; ny = h - 1 - y; }
       else { nx = y; ny = w - 1 - x; }
       dst32[ny * ow + nx] = src32[y * w + x];
+    }
+  }
+  return { data: out, width: ow, height: oh };
+}
+
+// ---------- Preparación para OCR ----------
+// Gris con la iluminación aplanada: cada píxel se divide por el fondo local (el papel) y el
+// "blanco" de cada zona se fija justo debajo de su ruido. Así desaparecen sombras y grano sin
+// adelgazar las letras. Parámetros elegidos midiendo el error de Tesseract en fotos de prueba.
+
+function gridFilter(g, gw, gh, median) {
+  const out = new Float32Array(g.length), win = [];
+  for (let y = 0; y < gh; y++) {
+    for (let x = 0; x < gw; x++) {
+      win.length = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx, yy = y + dy;
+          if (xx >= 0 && yy >= 0 && xx < gw && yy < gh) win.push(g[yy * gw + xx]);
+        }
+      }
+      if (median) { win.sort((a, b) => a - b); out[y * gw + x] = win[win.length >> 1]; }
+      else out[y * gw + x] = win.reduce((a, b) => a + b, 0) / win.length;
+    }
+  }
+  return out;
+}
+
+// Interpolación bilineal de una rejilla de bloques, recorriendo la imagen por filas.
+function gridSampler(gw, gh, bs, w) {
+  const x0 = new Int32Array(w), x1 = new Int32Array(w), fx = new Float32Array(w);
+  for (let x = 0; x < w; x++) {
+    const f = Math.min(gw - 1, Math.max(0, (x + 0.5) / bs - 0.5));
+    x0[x] = f | 0; x1[x] = Math.min(gw - 1, x0[x] + 1); fx[x] = f - x0[x];
+  }
+  return (grid, y, row) => {
+    const f = Math.min(gh - 1, Math.max(0, (y + 0.5) / bs - 0.5));
+    const y0 = f | 0, y1 = Math.min(gh - 1, y0 + 1), fy = f - y0;
+    for (let i = 0; i < gw; i++) row[i] = grid[y0 * gw + i] + (grid[y1 * gw + i] - grid[y0 * gw + i]) * fy;
+    return (x) => row[x0[x]] + (row[x1[x]] - row[x0[x]]) * fx[x];
+  };
+}
+
+export const OCR_MAX_SIDE = 3508; // ~300 ppp en una hoja A4/Carta
+
+export function prepareForOcr(img) {
+  const { width: w, height: h } = img;
+  const gray = toGray(img);
+  const smooth = boxBlur(gray, w, h, 1);
+  const bs = Math.max(8, Math.round(Math.max(w, h) / 28));
+  const gw = Math.ceil(w / bs), gh = Math.ceil(h / bs);
+  const sampler = gridSampler(gw, gh, bs, w);
+  const rowA = new Float32Array(gw), rowB = new Float32Array(gw);
+
+  // 1) Fondo: percentil 95 de cada bloque; mediana y promedios entre bloques vecinos.
+  let bg = new Float32Array(gw * gh);
+  const hist = new Uint32Array(256);
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < gw; gx++) {
+      hist.fill(0);
+      let cnt = 0;
+      const x0 = gx * bs, y0 = gy * bs, x1 = Math.min(w, x0 + bs), y1 = Math.min(h, y0 + bs);
+      for (let y = y0; y < y1; y += 2) for (let x = x0; x < x1; x += 2) { hist[smooth[y * w + x]]++; cnt++; }
+      let acc = 0, v = 255;
+      for (let i = 255; i >= 0; i--) { acc += hist[i]; if (acc >= cnt * 0.05) { v = i; break; } }
+      bg[gy * gw + gx] = Math.max(8, v);
+    }
+  }
+  bg = gridFilter(gridFilter(gridFilter(bg, gw, gh, true), gw, gh, false), gw, gh, false);
+
+  // 2) Punto blanco local: mediana del cociente menos 2 veces su ruido (p84 − p50).
+  const wpGrid = new Float32Array(gw * gh);
+  for (let gy = 0; gy < gh; gy++) {
+    const y0 = gy * bs, y1 = Math.min(h, y0 + bs);
+    const counts = Array.from({ length: gw }, () => new Uint32Array(320));
+    for (let y = y0; y < y1; y += 2) {
+      const bgAt = sampler(bg, y, rowA);
+      for (let x = 0; x < w; x += 2) {
+        const r = gray[y * w + x] / bgAt(x);
+        counts[(x / bs) | 0][Math.min(319, (r * 200) | 0)]++;
+      }
+    }
+    for (let gx = 0; gx < gw; gx++) {
+      const c = counts[gx];
+      let cnt = 0;
+      for (let i = 0; i < 320; i++) cnt += c[i];
+      if (!cnt) { // bloque de 1 px al borde sin muestras: igual que el vecino
+        wpGrid[gy * gw + gx] = gx ? wpGrid[gy * gw + gx - 1] : 0.9;
+        continue;
+      }
+      let acc = 0, p50 = -1, p84 = -1;
+      for (let i = 0; i < 320; i++) {
+        acc += c[i];
+        if (p50 < 0 && acc >= cnt * 0.5) p50 = (i + 0.5) / 200;
+        if (acc >= cnt * 0.84) { p84 = (i + 0.5) / 200; break; }
+      }
+      wpGrid[gy * gw + gx] = Math.min(0.97, Math.max(0.5, p50 - 2 * (p84 - p50)));
+    }
+  }
+  const wp = gridFilter(gridFilter(wpGrid, gw, gh, false), gw, gh, false);
+
+  // 3) Salida: 0 en la tinta, 255 en el papel.
+  const out = new Uint8ClampedArray(w * h);
+  for (let y = 0; y < h; y++) {
+    const bgAt = sampler(bg, y, rowA), wpAt = sampler(wp, y, rowB);
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      out[i] = 255 * (gray[i] / bgAt(x) - 0.1) / (wpAt(x) - 0.1);
+    }
+  }
+  return { data: out, width: w, height: h };
+}
+
+// Gira una imagen en gris (1 byte por píxel) k × 90° en sentido horario (como rotate()).
+export function rotateGray(img, k) {
+  k = ((k % 4) + 4) % 4;
+  if (!k) return img;
+  const { data, width: w, height: h } = img;
+  const ow = k % 2 ? h : w, oh = k % 2 ? w : h;
+  const out = new Uint8ClampedArray(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = k === 1 ? x * ow + (h - 1 - y) : k === 2 ? (h - 1 - y) * ow + (w - 1 - x) : (w - 1 - x) * ow + y;
+      out[i] = data[y * w + x];
+    }
+  }
+  return { data: out, width: ow, height: oh };
+}
+
+// Banda de la página con más tinta (renglones completos), reducida si hace falta, para probar
+// rápido un giro. Horizontal para probar 0°/180°; vertical para 90°/270° (en una página de lado
+// los renglones son verticales en la imagen sin girar).
+export function inkBand(img, vertical, frac = 0.35, maxSide = 2400) {
+  const { data, width: w, height: h } = img;
+  const n = vertical ? w : h;
+  const prof = new Float64Array(n);
+  for (let y = 0; y < h; y += 2) {
+    for (let x = 0; x < w; x += 2) if (data[y * w + x] < 128) prof[vertical ? x : y]++;
+  }
+  const size = Math.max(1, Math.round(n * frac));
+  let acc = 0;
+  for (let i = 0; i < size; i++) acc += prof[i];
+  let best = acc, start = 0;
+  for (let i = size; i < n; i++) {
+    acc += prof[i] - prof[i - size];
+    if (acc > best) { best = acc; start = i - size + 1; }
+  }
+  const x0 = vertical ? start : 0, y0 = vertical ? 0 : start;
+  const cw = vertical ? size : w, ch = vertical ? h : size;
+  const s = Math.min(1, maxSide / Math.max(cw, ch));
+  const ow = Math.max(1, Math.round(cw * s)), oh = Math.max(1, Math.round(ch * s));
+  const out = new Uint8ClampedArray(ow * oh);
+  for (let y = 0; y < oh; y++) {
+    const sy0 = y0 + Math.floor(y / s), sy1 = Math.max(sy0 + 1, Math.min(y0 + ch, y0 + Math.floor((y + 1) / s)));
+    for (let x = 0; x < ow; x++) {
+      const sx0 = x0 + Math.floor(x / s), sx1 = Math.max(sx0 + 1, Math.min(x0 + cw, x0 + Math.floor((x + 1) / s)));
+      let sum = 0, cnt = 0;
+      for (let yy = sy0; yy < sy1; yy++) for (let xx = sx0; xx < sx1; xx++) { sum += data[yy * w + xx]; cnt++; }
+      out[y * ow + x] = sum / cnt;
     }
   }
   return { data: out, width: ow, height: oh };
