@@ -1,5 +1,5 @@
 // Service worker: permite usar la app sin conexión y abrirla al instante.
-const VERSION = 'scaner-v4';
+const VERSION = 'scaner-v5';
 const APP_SHELL = [
   './',
   'index.html',
@@ -9,6 +9,7 @@ const APP_SHELL = [
   'js/export.js',
   'js/imgproc.js',
   'js/ocr.js',
+  'js/pdfimport.js',
   'js/worker.js',
   'manifest.webmanifest',
   'icons/icon.svg',
@@ -24,8 +25,8 @@ self.addEventListener('install', (e) => {
     .then(() => self.skipWaiting()));
 });
 
-// Archivos del lector de texto de la versión en uso (los demás se borran al actualizar).
-const CDN_CURRENT = /tesseract\.js(-core)?@v?7\.0\.0\//;
+// Lector de texto y de PDF de las versiones en uso (lo demás se borra al actualizar).
+const CDN_CURRENT = /tesseract\.js(-core)?@v?7\.0\.0\/|pdfjs-dist@6\.4\.299\//;
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(
@@ -42,7 +43,7 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
 
-  // Lector de texto (Tesseract, versión fija): el motor se descarga una vez y queda guardado.
+  // Lectores de texto (Tesseract) y de PDF (pdf.js), versiones fijas: se descargan una vez y quedan.
   // Se pide siempre con CORS para poder comprobar que la respuesta es válida antes de guardarla.
   // Los idiomas no se guardan aquí: Tesseract ya los guarda en su propia base de datos.
   if (url.hostname === 'cdn.jsdelivr.net' && CDN_CURRENT.test(url.pathname)) {

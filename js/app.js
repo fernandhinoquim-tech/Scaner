@@ -5,6 +5,7 @@ import {
 } from './imgproc.js';
 import * as ex from './export.js';
 import * as ocr from './ocr.js';
+import { isPdf, renderPdf } from './pdfimport.js';
 
 const $ = (id) => document.getElementById(id);
 const MAX_ORIGINAL = 3200;   // lado máximo de la foto original guardada
@@ -175,7 +176,14 @@ async function ensureDoc() {
   return state.doc;
 }
 
-async function addPage(originalCanvas, corners) {
+// Dónde van las páginas nuevas: al final, o en la posición elegida con "＋" (insertar entre
+// páginas). La posición avanza con cada página para que varias queden en el orden en que llegan.
+function nextIndex(doc) {
+  if (state.insertAt == null || state.insertAt > doc.pageIds.length) return doc.pageIds.length;
+  return state.insertAt++;
+}
+
+async function addPage(originalCanvas, corners, { filter, source } = {}) {
   const doc = await ensureDoc();
   const original = await canvasToBlob(originalCanvas, 'image/jpeg', 0.92);
   const page = {
@@ -185,46 +193,90 @@ async function addPage(originalCanvas, corners) {
     ow: originalCanvas.width,
     oh: originalCanvas.height,
     corners: corners || FULL_FRAME,
-    filter: store.get('filter', 'doc'),
+    filter: filter || store.get('filter', 'doc'),
     rotation: 0,
     created: Date.now(),
+    ...(source ? { source } : {}),
   };
   await db.putPage(page);
-  doc.pageIds.push(page.id);
-  state.pages.push(page);
+  const at = nextIndex(doc);
+  doc.pageIds.splice(at, 0, page.id);
+  state.pages.splice(at, 0, page);
+  state.lastAdded = page;
   await db.putDoc(doc);
   const data = getData(originalCanvas);
   enqueue(() => renderPage(page, data));
   return page;
 }
 
+const PDF_MAX_SIDE = 2800; // ~250 ppp en una hoja carta: nítido para leer y para el OCR
+const isImage = (f) => (f.type || '').startsWith('image/') || /\.(jpe?g|png|webp|gif|bmp|heic|heif|avif)$/i.test(f.name || '');
+const isWord = (f) => /\.(docx?|odt|rtf|pages)$/i.test(f.name || '');
+
 async function importFiles(files) {
-  if (!files.length) return;
-  toast(files.length > 1 ? `Importando ${files.length} imágenes…` : 'Importando…');
+  if (!files.length) return endInsert(0);
+  const usable = files.filter(f => isPdf(f) || isImage(f));
+  if (!usable.length) {
+    endInsert(0);
+    return toast(files.some(isWord)
+      ? 'Los archivos de Word aún no se pueden abrir aquí. En Word usa Archivo → Guardar como → PDF y súbelo.'
+      : 'Ese tipo de archivo no se puede agregar: elige imágenes o documentos PDF.', 7000);
+  }
+  toast(usable.length > 1 ? `Importando ${usable.length} archivos…` : 'Importando…');
+  state.importing = true; // al salir de la cámara para importar, no se cierra la inserción
   await ensureDoc();
   if (state.view === 'camera') {
     if (state.cameraFrom === 'doc') history.back(); else openDocView('replace');
   } else if (state.view !== 'doc') {
     openDocView();
   }
-  for (const f of files) {
+  let added = 0;
+  for (const f of usable) {
     try {
-      const bmp = await decodeBlob(f);
-      const canvas = drawScaled(bmp, bmp.width, bmp.height, MAX_ORIGINAL);
-      bmp.close && bmp.close();
-      await addPage(canvas, detectOn(canvas));
-      renderDoc();
+      if (isPdf(f)) {
+        // Las páginas de un PDF ya están derechas y limpias: sin recorte ni filtro.
+        await renderPdf(f, PDF_MAX_SIDE, async (canvas, n, total) => {
+          if (total > 1) toast(`Importando PDF: página ${n} de ${total}…`, 4000);
+          await addPage(canvas, FULL_FRAME, { filter: 'original', source: 'pdf' });
+          added++;
+          renderDoc();
+        });
+      } else {
+        const bmp = await decodeBlob(f);
+        const canvas = drawScaled(bmp, bmp.width, bmp.height, MAX_ORIGINAL);
+        bmp.close && bmp.close();
+        await addPage(canvas, detectOn(canvas));
+        added++;
+        renderDoc();
+      }
     } catch (err) {
       console.error(err);
-      toast('No se pudo abrir una imagen');
+      toast(err.message && isPdf(f) ? err.message : `No se pudo abrir "${f.name}"`, 6000);
     }
   }
+  state.importing = false;
+  const skipped = files.length - usable.length;
+  endInsert(added, skipped ? `${skipped} archivo(s) no se agregaron: solo se aceptan imágenes y PDF.` : '');
+}
+
+// Fin de una inserción entre páginas: avisa dónde quedaron y vuelve a agregar al final.
+function endInsert(added, extra = '') {
+  let msg = '';
+  if (state.insertAt != null && added) {
+    const first = state.insertAt - added + 1;
+    msg = added === 1 ? `Se agregó la página ${first}.` : `Se agregaron las páginas ${first} a ${first + added - 1}.`;
+  }
+  state.insertAt = null;
+  if (msg || extra) toast([msg, extra].filter(Boolean).join(' '), extra ? 6000 : 3000);
 }
 
 // ---------------- Navegación ----------------
 
 function setView(name) {
-  if (state.view === 'camera' && name !== 'camera') stopCamera();
+  if (state.view === 'camera' && name !== 'camera') {
+    stopCamera();
+    if (!state.importing) endInsert(state.capturedThisSession);
+  }
   state.view = name;
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + name));
   closeExport();
@@ -319,35 +371,162 @@ async function renderHome() {
 
 function renderDoc() {
   if (state.view !== 'doc' || !state.doc) return;
+  if (drag) { drag.rerender = true; return; } // no rehacer la cuadrícula a mitad de un arrastre
   revokeAll();
   const doc = state.doc;
   if (document.activeElement !== $('doc-title')) $('doc-title').value = doc.name;
   const n = state.pages.length;
   const pending = state.pages.filter(p => !p.processed).length;
-  $('doc-info').textContent = `${n} ${n === 1 ? 'página' : 'páginas'}` +
-    (pending ? ` · procesando ${pending}…` : ' · toca una página para editarla');
+  $('doc-info').textContent = `${n} ${n === 1 ? 'página' : 'páginas'}` + (pending ? ` · procesando ${pending}…`
+    : n > 1 ? ' · toca para editar, mantén presionada para mover, ＋ para insertar' : ' · toca para editar, ＋ para insertar');
   const grid = $('page-grid');
   grid.innerHTML = '';
   state.pages.forEach((page, i) => {
-    const card = document.createElement('button');
-    card.type = 'button';
+    const card = document.createElement('div');
     card.className = 'page-card' + (page.processed ? '' : ' processing');
     card.dataset.id = page.id;
+    card.setAttribute('role', 'button');
+    card.tabIndex = 0;
     const img = document.createElement('img');
     img.alt = `Página ${i + 1}`;
+    img.draggable = false;
     if (page.thumb) img.src = objUrl(page.thumb);
     const num = document.createElement('span');
     num.className = 'num';
     num.textContent = i + 1;
-    card.append(img, num);
-    card.addEventListener('click', () => {
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'page-add';
+    add.textContent = '＋';
+    add.setAttribute('aria-label', `Insertar después de la página ${i + 1}`);
+    add.addEventListener('click', (e) => { e.stopPropagation(); openInsert(i + 1); });
+    card.append(img, num, add);
+    const open = () => {
       if (!page.processed) return toast('Esta página aún se está procesando');
-      nav('edit', { index: i });
-    });
+      nav('edit', { index: state.pages.indexOf(page) });
+    };
+    card.addEventListener('click', () => { if (!dragJustEnded()) open(); });
+    card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+    card.addEventListener('pointerdown', (e) => dragDown(card, e));
+    card.addEventListener('contextmenu', (e) => e.preventDefault());
     grid.appendChild(card);
   });
   $('btn-doc-export').disabled = n === 0;
 }
+
+// ---- Reordenar: mantener presionada una página y arrastrarla ----
+let drag = null;
+let dragEndedAt = 0;
+const dragJustEnded = () => performance.now() - dragEndedAt < 400;
+
+function dragDown(card, e) {
+  if (e.button > 0 || e.target.closest('.page-add') || state.pages.length < 2) return;
+  const start = { card, id: card.dataset.id, x: e.clientX, y: e.clientY, pointerId: e.pointerId, active: false };
+  const cancel = () => {
+    clearTimeout(start.timer);
+    card.removeEventListener('pointermove', early);
+    card.removeEventListener('pointerup', cancel);
+    card.removeEventListener('pointercancel', cancel);
+  };
+  // Si el dedo se mueve antes de tiempo, es desplazamiento normal de la lista.
+  const early = (ev) => { if (Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > 10) cancel(); };
+  card.addEventListener('pointermove', early);
+  card.addEventListener('pointerup', cancel);
+  card.addEventListener('pointercancel', cancel);
+  start.timer = setTimeout(() => { cancel(); beginDrag(start); }, 350);
+}
+
+function beginDrag(start) {
+  const { card } = start;
+  const r = card.getBoundingClientRect();
+  const ghost = card.cloneNode(true);
+  ghost.classList.add('drag-ghost');
+  Object.assign(ghost.style, { width: r.width + 'px', height: r.height + 'px', left: r.left + 'px', top: r.top + 'px' });
+  document.body.appendChild(ghost);
+  card.classList.add('drag-placeholder');
+  drag = { ...start, ghost, dx: start.x - r.left, dy: start.y - r.top, x: start.x, y: start.y, rerender: false };
+  if (navigator.vibrate) navigator.vibrate(20);
+  // Se escucha en todo el documento: al mover la tarjeta en la lista, el navegador suelta la
+  // captura del dedo y los eventos ya no le llegarían a ella.
+  document.addEventListener('pointermove', dragMove);
+  document.addEventListener('pointerup', dragEnd);
+  document.addEventListener('pointercancel', dragEnd);
+  drag.raf = requestAnimationFrame(dragScroll);
+}
+
+// Mientras se arrastra, que el dedo no desplace la página.
+document.addEventListener('touchmove', (e) => { if (drag) e.preventDefault(); }, { passive: false });
+
+function dragMove(e) {
+  if (!drag || e.pointerId !== drag.pointerId) return;
+  drag.x = e.clientX; drag.y = e.clientY;
+  drag.ghost.style.left = (e.clientX - drag.dx) + 'px';
+  drag.ghost.style.top = (e.clientY - drag.dy) + 'px';
+  dragPlace();
+}
+
+// Pone el hueco de la página arrastrada antes o después de la tarjeta que está bajo el dedo.
+function dragPlace() {
+  const target = document.elementFromPoint(drag.x, drag.y);
+  const over = target && target.closest('.page-card');
+  if (!over || over === drag.card || over.classList.contains('drag-ghost')) return;
+  const r = over.getBoundingClientRect();
+  const after = drag.x > r.left + r.width / 2;
+  $('page-grid').insertBefore(drag.card, after ? over.nextSibling : over);
+}
+
+// Desplaza la lista sola cuando el dedo llega al borde de arriba o de abajo.
+function dragScroll() {
+  if (!drag) return;
+  const grid = $('page-grid'), r = grid.getBoundingClientRect(), zone = 70, before = grid.scrollTop;
+  if (drag.y < r.top + zone) grid.scrollTop -= Math.ceil((r.top + zone - drag.y) / 6);
+  else if (drag.y > r.bottom - zone) grid.scrollTop += Math.ceil((drag.y - (r.bottom - zone)) / 6);
+  if (grid.scrollTop !== before) dragPlace(); // la lista se movió bajo el dedo quieto
+  drag.raf = requestAnimationFrame(dragScroll);
+}
+
+async function dragEnd(e) {
+  if (!drag || (e && e.pointerId !== drag.pointerId)) return;
+  const d = drag;
+  drag = null;
+  dragEndedAt = performance.now();
+  cancelAnimationFrame(d.raf);
+  d.ghost.remove();
+  d.card.classList.remove('drag-placeholder');
+  document.removeEventListener('pointermove', dragMove);
+  document.removeEventListener('pointerup', dragEnd);
+  document.removeEventListener('pointercancel', dragEnd);
+  const order = [...$('page-grid').querySelectorAll('.page-card')].map(c => c.dataset.id);
+  const byId = new Map(state.pages.map(p => [p.id, p]));
+  const moved = order.join() !== state.doc.pageIds.join();
+  state.pages = order.map(id => byId.get(id)).filter(Boolean);
+  state.doc.pageIds = state.pages.map(p => p.id);
+  renderDoc();
+  if (moved) {
+    await db.putDoc(state.doc);
+    toast(`Página movida a la posición ${state.doc.pageIds.indexOf(d.id) + 1}`, 1500);
+  }
+}
+
+// ---- Insertar páginas después de una página ----
+function openInsert(at) {
+  state.pendingInsert = at;
+  $('insert-title').textContent = `Insertar después de la página ${at}`;
+  $('sheet-insert').classList.remove('hidden');
+}
+const closeInsert = () => $('sheet-insert').classList.add('hidden');
+$('btn-insert-cam').addEventListener('click', () => {
+  closeInsert();
+  openCamera('doc');
+  state.insertAt = state.pendingInsert;
+});
+$('btn-insert-file').addEventListener('click', () => {
+  closeInsert();
+  state.insertAt = state.pendingInsert;
+  $('file-input').click();
+});
+$('btn-insert-cancel').addEventListener('click', closeInsert);
+$('sheet-insert').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeInsert(); });
 
 function onPageReady(page) {
   if (state.view === 'doc') renderDoc();
@@ -370,8 +549,8 @@ $('btn-doc-delete').addEventListener('click', async () => {
   nav('home', {}, 'replace');
   toast('Documento eliminado');
 });
-$('btn-doc-cam').addEventListener('click', () => openCamera('doc'));
-$('btn-doc-import').addEventListener('click', () => $('file-input').click());
+$('btn-doc-cam').addEventListener('click', () => { state.insertAt = null; openCamera('doc'); });
+$('btn-doc-import').addEventListener('click', () => { state.insertAt = null; $('file-input').click(); });
 $('btn-doc-export').addEventListener('click', () => openExport());
 
 // ---------------- Cámara ----------------
@@ -567,8 +746,8 @@ function updateCamThumb(page) {
   $('cam-count').classList.toggle('hidden', n === 0);
   const img = $('cam-thumb-img');
   if (n === 0) { img.removeAttribute('src'); return; }
-  const last = page || state.pages[state.pages.length - 1];
-  if (last && last.thumb && last === state.pages[state.pages.length - 1]) {
+  const last = page || state.lastAdded;
+  if (last && last.thumb && last === state.lastAdded) {
     if (img.src) URL.revokeObjectURL(img.src);
     img.src = URL.createObjectURL(last.thumb);
   }
@@ -1143,8 +1322,8 @@ $('btn-export-share').addEventListener('click', async () => {
 
 // ---------------- Inicio / instalación ----------------
 
-$('btn-scan-home').addEventListener('click', () => { state.doc = null; state.pages = []; openCamera('home'); });
-$('btn-import-home').addEventListener('click', () => { state.doc = null; state.pages = []; $('file-input').click(); });
+$('btn-scan-home').addEventListener('click', () => { state.doc = null; state.pages = []; state.insertAt = null; openCamera('home'); });
+$('btn-import-home').addEventListener('click', () => { state.doc = null; state.pages = []; state.insertAt = null; $('file-input').click(); });
 $('file-input').addEventListener('change', (e) => { importFiles([...e.target.files]); e.target.value = ''; });
 $('native-cam-input').addEventListener('change', (e) => { importFiles([...e.target.files]); e.target.value = ''; });
 

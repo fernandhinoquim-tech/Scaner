@@ -37,7 +37,7 @@
     <div class="home-actions">
       <button id="btn-import-home" class="btn secondary" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z M4 15l5-5 4 4 3-3 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
-        Galería
+        Importar
       </button>
       <button id="btn-scan-home" class="btn primary big" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg>
@@ -92,7 +92,7 @@
     <main id="page-grid" class="page-grid"></main>
     <div class="doc-actions">
       <button id="btn-doc-cam" class="btn secondary" type="button">+ Cámara</button>
-      <button id="btn-doc-import" class="btn secondary" type="button">+ Galería</button>
+      <button id="btn-doc-import" class="btn secondary" type="button">+ Archivos</button>
       <button id="btn-doc-export" class="btn primary" type="button">Guardar / Compartir</button>
     </div>
   </section>
@@ -182,8 +182,23 @@
     </div>
   </div>
 
+  <!-- Hoja para insertar páginas entre otras -->
+  <div id="sheet-insert" class="sheet-backdrop hidden">
+    <div class="sheet" role="dialog" aria-labelledby="insert-title">
+      <h2 id="insert-title">Insertar después de la página</h2>
+      <p class="export-note">Las páginas nuevas quedan en ese lugar, en el orden en que las agregues.</p>
+      <div class="insert-options">
+        <button id="btn-insert-cam" class="btn primary" type="button">Tomar fotos</button>
+        <button id="btn-insert-file" class="btn secondary" type="button">Imágenes o PDF</button>
+      </div>
+      <div class="sheet-actions">
+        <button id="btn-insert-cancel" class="btn secondary" type="button">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast"></div>
-  <input id="file-input" type="file" accept="image/*" multiple hidden>
+  <input id="file-input" type="file" accept="image/*,application/pdf,.pdf" multiple hidden>
   <input id="native-cam-input" type="file" accept="image/*" capture="environment" hidden>
 
   <script type="module" src="js/app.js"></script>

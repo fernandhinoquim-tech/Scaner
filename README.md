@@ -16,7 +16,14 @@ en la pantalla de inicio como cualquier app.
 - **Ilimitado**: sin límite de páginas ni de documentos. Todo se guarda en el propio
   teléfono (nada se sube a internet).
 - **Filtros**: Documento (quita sombras y tintes de luz de color, fondo blanco, conserva fotos y colores), Color, Gris, Blanco y negro, Original.
-- **Edición**: ajustar esquinas con lupa, girar, reordenar y borrar páginas, renombrar documentos.
+- **Edición**: ajustar esquinas con lupa, girar, borrar páginas, renombrar documentos.
+- **Ordenar páginas**: mantén presionada una página y arrástrala a su nuevo lugar.
+- **Importar PDF e imágenes**: con *Importar* o *+ Archivos* puedes subir fotos o documentos PDF;
+  cada página del PDF queda como una página más del documento (y se puede leer su texto con OCR).
+  Los archivos de Word hay que guardarlos primero como PDF (en Word: *Archivo → Guardar como → PDF*).
+  La primera vez que se importa un PDF se descarga el lector de PDF (unos 2 MB).
+- **Insertar páginas en medio**: el botón **＋** de cada página abre *Insertar después de la
+  página N*: puedes tomar fotos o subir imágenes/PDF y quedan justo en ese lugar.
 - **Formatos de salida**:
   - **PDF** (una o varias páginas; hoja Automática, Carta, A4 u Oficio), con **texto buscable**
     opcional: el PDF se ve igual que el escaneo, pero puedes buscar, seleccionar y copiar palabras
@@ -70,6 +77,7 @@ js/app.js             Lógica de pantallas, cámara, edición y exportación
 js/imgproc.js         Detección de bordes, corrección de perspectiva, filtros y preparación para OCR
 js/worker.js          Procesa las imágenes en segundo plano
 js/ocr.js             Lector de texto (Tesseract.js): carga, lectura, cancelación
+js/pdfimport.js       Importación de PDF (pdf.js): convierte cada página en imagen
 js/export.js          Generación de PDF (con capa de texto), ZIP, DOCX y TXT
 js/db.js              Almacenamiento local (IndexedDB)
 sw.js                 Funcionamiento sin conexión
@@ -77,4 +85,5 @@ manifest.webmanifest  Datos para instalar la app
 ```
 
 No usa librerías ni proceso de compilación; el PDF (incluida su capa de texto) y el ZIP se generan
-con código propio. El OCR usa Tesseract.js, que se descarga solo al usarlo.
+con código propio. El OCR usa Tesseract.js y la importación de PDF usa pdf.js; ambos se descargan
+solo al usarlos.
