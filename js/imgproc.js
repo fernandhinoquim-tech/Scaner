@@ -227,21 +227,33 @@ function detectByBrightness(gray, w, h) {
   return best && best.quad;
 }
 
-// Método 2: bordes rectos. Gradiente (Sobel) + supresión de no-máximos; guarda la dirección
-// del gradiente (grados 0..359, apunta hacia lo más claro) en cada píxel de borde, o -1.
-function edgeMap(gray, w, h) {
-  const n = w * h;
+// Método 2: bordes rectos. Gradiente (Sobel) en cada canal de color, quedándose con el más
+// fuerte: así se ve el borde aunque papel y mesa tengan casi el mismo brillo pero distinto tono
+// (mesa blanca). Supresión de no-máximos; guarda la dirección del gradiente (grados 0..359,
+// apunta hacia lo más claro en ese canal) en cada píxel de borde, o -1.
+function edgeMap(img, w, h) {
+  const n = w * h, d = img.data;
+  const chans = [0, 1, 2].map(c => {
+    const g = new Uint8ClampedArray(n);
+    for (let i = c, p = 0; p < n; i += 4, p++) g[p] = d[i];
+    return boxBlur(boxBlur(g, w, h, 1), w, h, 1);
+  });
   const mag = new Float32Array(n), gxs = new Float32Array(n), gys = new Float32Array(n);
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const i = y * w + x;
-      const a = gray[i - w - 1], b = gray[i - w], c = gray[i - w + 1];
-      const d = gray[i - 1], f = gray[i + 1];
-      const g = gray[i + w - 1], k = gray[i + w], l = gray[i + w + 1];
-      const gx = (c + 2 * f + l) - (a + 2 * d + g);
-      const gy = (g + 2 * k + l) - (a + 2 * b + c);
-      gxs[i] = gx; gys[i] = gy;
-      mag[i] = Math.sqrt(gx * gx + gy * gy);
+      let best = -1, bx = 0, by = 0;
+      for (const g of chans) {
+        const a = g[i - w - 1], b = g[i - w], c = g[i - w + 1];
+        const e = g[i - 1], f = g[i + 1];
+        const k = g[i + w - 1], l = g[i + w], m = g[i + w + 1];
+        const gx = (c + 2 * f + m) - (a + 2 * e + k);
+        const gy = (k + 2 * l + m) - (a + 2 * b + c);
+        const mm = gx * gx + gy * gy;
+        if (mm > best) { best = mm; bx = gx; by = gy; }
+      }
+      gxs[i] = bx; gys[i] = by;
+      mag[i] = Math.sqrt(best);
     }
   }
   // Umbral relativo al ruido: en las zonas planas el gradiente solo mide ruido.
@@ -398,6 +410,28 @@ function quadSupport(q, { ang }, w, h, minScore = -Infinity) {
   return { S, P: total, score: 2 * S - total, polarity: pos >= neg ? 1 : -1 };
 }
 
+// ¿Algún lado corta a través del contenido? Si del otro lado del borde sigue habiendo texto
+// (muchos bordes pequeños), ese lado no es el borde de la hoja sino un renglón o una sombra.
+function cutsContent(q, { ang }, w, h) {
+  for (const sd of sideInfo(q)) {
+    const steps = Math.max(1, Math.floor(sd.len));
+    let inside = 0, outside = 0, n = 0;
+    for (let s = Math.ceil(steps * 0.1); s <= steps * 0.9; s += 2) {
+      const px = sd.a[0] + sd.dx * s / steps, py = sd.a[1] + sd.dy * s / steps;
+      n++;
+      for (let t = 3; t <= 10; t++) {
+        const xo = Math.round(px + sd.nx * t), yo = Math.round(py + sd.ny * t);
+        const xi = Math.round(px - sd.nx * t), yi = Math.round(py - sd.ny * t);
+        if (xo >= 0 && yo >= 0 && xo < w && yo < h && ang[yo * w + xo] >= 0) outside++;
+        if (xi >= 0 && yi >= 0 && xi < w && yi < h && ang[yi * w + xi] >= 0) inside++;
+      }
+    }
+    const din = inside / (n * 8), dout = outside / (n * 8);
+    if (din > 0.15 && dout > din * 0.6) return true;
+  }
+  return false;
+}
+
 // Ajusta cada lado a los píxeles de borde cercanos (mínimos cuadrados) y lo mete ~1 px hacia adentro.
 function refineQuad(q, { ang }, w, h, polarity) {
   const lines = sideInfo(q).map(sd => {
@@ -437,7 +471,7 @@ function refineQuad(q, { ang }, w, h, polarity) {
 export function detectDocument(img) {
   const { width: w, height: h } = img;
   const gray = toGray(img);
-  const edges = edgeMap(boxBlur(boxBlur(gray, w, h, 1), w, h, 1), w, h);
+  const edges = edgeMap(img, w, h);
   const L = houghLines(edges, w, h);
 
   // Candidatos: dos pares de rectas casi paralelas que se cruzan.
@@ -461,16 +495,22 @@ export function detectDocument(img) {
 
   // Solo cuentan los candidatos con al menos 60 % del perímetro apoyado en bordes reales.
   const accepted = (b) => b && b.S >= b.P * 0.6;
-  let best = null;
+  // Se guardan los mejores candidatos y gana el primero que no corta a través del contenido.
+  const top = [], K = 6;
   for (const { q } of quads.slice(0, 600)) {
-    const sup = quadSupport(q, edges, w, h, best ? best.score : -Infinity);
-    if (accepted(sup) && (!best || sup.score > best.score)) best = { q, ...sup };
+    const min = top.length >= K ? top[K - 1].score : -Infinity;
+    const sup = quadSupport(q, edges, w, h, min);
+    if (!accepted(sup) || sup.score <= min) continue;
+    top.push({ q, ...sup });
+    top.sort((a, b) => b.score - a.score);
+    if (top.length > K) top.pop();
   }
+  let best = top.find(c => !cutsContent(c.q, edges, w, h)) || null;
   if (!best) {
     // Respaldo (p. ej. hojas curvas): la mancha clara más grande, validada con el mismo criterio.
     const bq = detectByBrightness(gray, w, h);
     const sup = bq && quadSupport(bq, edges, w, h);
-    if (accepted(sup)) best = { q: bq, ...sup };
+    if (accepted(sup) && !cutsContent(bq, edges, w, h)) best = { q: bq, ...sup };
   }
   if (!best) return null;
   const quad = orderCorners(refineQuad(best.q, edges, w, h, best.polarity));
@@ -592,70 +632,157 @@ function enhance(img) {
   return img;
 }
 
-// Elimina sombras e iluminación desigual: divide cada canal por un fondo estimado.
-function normalizeBackground(img) {
-  const { data, width: w, height: h } = img;
-  const bs = Math.max(8, Math.round(Math.max(w, h) / 28));
-  const gw = Math.ceil(w / bs), gh = Math.ceil(h / bs);
-  const grid = [new Float32Array(gw * gh), new Float32Array(gw * gh), new Float32Array(gw * gh)];
-  // Percentil alto por bloque (aprox: máximo de medias 2x2 para evitar ruido).
-  for (let gy = 0; gy < gh; gy++) {
-    for (let gx = 0; gx < gw; gx++) {
-      const x0 = gx * bs, y0 = gy * bs;
-      const x1 = Math.min(w, x0 + bs), y1 = Math.min(h, y0 + bs);
-      let m0 = 0, m1 = 0, m2 = 0;
-      for (let y = y0; y < y1 - 1; y += 2) {
-        for (let x = x0; x < x1 - 1; x += 2) {
-          const a = (y * w + x) * 4, b = a + w * 4;
-          const r = (data[a] + data[a + 4] + data[b] + data[b + 4]) >> 2;
-          const g = (data[a + 1] + data[a + 5] + data[b + 1] + data[b + 5]) >> 2;
-          const bl = (data[a + 2] + data[a + 6] + data[b + 2] + data[b + 6]) >> 2;
-          if (r + g + bl > m0 + m1 + m2) { m0 = r; m1 = g; m2 = bl; }
-        }
-      }
-      const gi = gy * gw + gx;
-      grid[0][gi] = m0; grid[1][gi] = m1; grid[2][gi] = m2;
-    }
-  }
-  // Dilatación + suavizado de la rejilla para ignorar bloques ocupados por texto/imágenes.
-  const smooth = (g, op) => {
-    const out = new Float32Array(g.length);
+// Rellena los bloques desconocidos de una o varias rejillas con el promedio de sus vecinos conocidos.
+function fillFromNeighbors(grids, known, gw, gh) {
+  let pending = known.length - known.reduce((a, b) => a + b, 0);
+  while (pending > 0) {
+    const add = [];
     for (let y = 0; y < gh; y++) {
       for (let x = 0; x < gw; x++) {
-        let acc = op === 'max' ? 0 : 0, n = 0;
+        const b = y * gw + x;
+        if (known[b]) continue;
+        let n = 0;
+        const sums = grids.map(() => 0);
         for (let dy = -1; dy <= 1; dy++) {
           for (let dx = -1; dx <= 1; dx++) {
             const xx = x + dx, yy = y + dy;
-            if (xx < 0 || yy < 0 || xx >= gw || yy >= gh) continue;
-            const v = g[yy * gw + xx];
-            if (op === 'max') acc = Math.max(acc, v); else { acc += v; n++; }
+            if (xx < 0 || yy < 0 || xx >= gw || yy >= gh || !known[yy * gw + xx]) continue;
+            n++;
+            grids.forEach((g, c) => { sums[c] += g[yy * gw + xx]; });
           }
         }
-        out[y * gw + x] = op === 'max' ? acc : acc / n;
+        if (n) add.push([b, sums.map(v => v / n)]);
       }
     }
-    return out;
+    if (!add.length) break;
+    for (const [b, vals] of add) { grids.forEach((g, c) => { g[b] = vals[c]; }); known[b] = 1; pending--; }
+  }
+}
+
+// Elimina sombras e iluminación desigual sin "lavar" fotos ni colores.
+// 1) Por bloques: color del fondo (percentil 95 de cada canal) y si el bloque es papel: parejo y
+//    con poco color (tolera el tinte de una luz de color). Un bloque liso rodeado de contenido
+//    (el cielo de una foto) cuenta como contenido. 2) Los bloques de contenido toman la
+//    iluminación de sus vecinos de papel. 3) Cada píxel se divide por esa iluminación y el grano
+//    del papel se lleva a blanco según el ruido de cada zona (sin aclarar grises de verdad).
+function normalizeBackground(img) {
+  const { data, width: w, height: h } = img;
+  const bs = Math.max(8, Math.round(Math.max(w, h) / 28));
+  const gw = Math.ceil(w / bs), gh = Math.ceil(h / bs), G = gw * gh;
+  const grids = [new Float32Array(G), new Float32Array(G), new Float32Array(G)];
+  const paper = new Uint8Array(G);
+  const hc = [new Uint32Array(256), new Uint32Array(256), new Uint32Array(256)], hl = new Uint32Array(256);
+  const pct = (hist, cnt, q) => {
+    let acc = 0;
+    for (let i = 255; i >= 0; i--) { acc += hist[i]; if (acc >= cnt * (1 - q)) return i; }
+    return 0;
   };
-  for (let c = 0; c < 3; c++) grid[c] = smooth(smooth(smooth(grid[c], 'max'), 'mean'), 'mean');
-  // Evita que zonas oscuras grandes se conviertan en "papel".
-  let paper = 0;
-  for (let i = 0; i < gw * gh; i++) paper = Math.max(paper, (grid[0][i] + grid[1][i] + grid[2][i]) / 3);
-  const floor = paper * 0.45;
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < gw; gx++) {
+      for (const hh of hc) hh.fill(0);
+      hl.fill(0);
+      let cnt = 0;
+      const x0 = gx * bs, y0 = gy * bs, x1 = Math.min(w, x0 + bs), y1 = Math.min(h, y0 + bs);
+      for (let y = y0; y < y1; y += 2) {
+        for (let x = x0; x < x1; x += 2) {
+          const i = (y * w + x) * 4;
+          hc[0][data[i]]++; hc[1][data[i + 1]]++; hc[2][data[i + 2]]++;
+          hl[(data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8]++;
+          cnt++;
+        }
+      }
+      const b = gy * gw + gx;
+      for (let c = 0; c < 3; c++) grids[c][b] = Math.max(8, pct(hc[c], cnt, 0.95));
+      const l95 = pct(hl, cnt, 0.95), l50 = pct(hl, cnt, 0.5);
+      const chroma = Math.max(grids[0][b], grids[1][b], grids[2][b]) - Math.min(grids[0][b], grids[1][b], grids[2][b]);
+      paper[b] = l95 > 25 && l95 - l50 <= 0.12 * l95 && chroma <= 0.25 * l95 ? 1 : 0;
+    }
+  }
+  for (let pass = 0; pass < 2; pass++) {
+    const prev = paper.slice();
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        if (!prev[y * gw + x]) continue;
+        let content = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = x + dx, yy = y + dy;
+            if ((dx || dy) && xx >= 0 && yy >= 0 && xx < gw && yy < gh && !prev[yy * gw + xx]) content++;
+          }
+        }
+        if (content >= 3) paper[y * gw + x] = 0;
+      }
+    }
+  }
+  if (!paper.some(Boolean)) paper.fill(1);
+  fillFromNeighbors(grids, paper.slice(), gw, gh);
+  const bg = grids.map(g => gridFilter(gridFilter(gridFilter(g, gw, gh, true), gw, gh, false), gw, gh, false));
+  let top = 0;
+  for (let b = 0; b < G; b++) top = Math.max(top, (bg[0][b] + bg[1][b] + bg[2][b]) / 3);
+  const floor = top * 0.12;
+  // Interpolación bilineal de las rejillas: índices por columna una vez, y por fila una vez.
+  const cx0 = new Int32Array(w), cx1 = new Int32Array(w), cfx = new Float32Array(w);
+  for (let x = 0; x < w; x++) {
+    const f = Math.min(gw - 1, Math.max(0, (x + 0.5) / bs - 0.5));
+    cx0[x] = f | 0; cx1[x] = Math.min(gw - 1, cx0[x] + 1); cfx[x] = f - cx0[x];
+  }
+  const rowOf = (grid, y, row) => {
+    const f = Math.min(gh - 1, Math.max(0, (y + 0.5) / bs - 0.5));
+    const y0 = f | 0, y1 = Math.min(gh - 1, y0 + 1), fy = f - y0;
+    for (let i = 0; i < gw; i++) row[i] = grid[y0 * gw + i] + (grid[y1 * gw + i] - grid[y0 * gw + i]) * fy;
+  };
+  const rR = new Float32Array(gw), rG = new Float32Array(gw), rB = new Float32Array(gw), rW = new Float32Array(gw);
+  // Inverso de la iluminación (con piso) por fila y canal.
+  const invRow = (y) => {
+    rowOf(bg[0], y, rR); rowOf(bg[1], y, rG); rowOf(bg[2], y, rB);
+    for (let i = 0; i < gw; i++) { rR[i] = 1 / Math.max(floor, rR[i]); rG[i] = 1 / Math.max(floor, rG[i]); rB[i] = 1 / Math.max(floor, rB[i]); }
+  };
+
+  // Punto blanco de cada bloque de papel ya corregido: mediana − 1,5 × ruido (p84 − p50), ≥ 0,9.
+  const wpGrid = new Float32Array(G), wpKnown = new Uint8Array(G);
+  for (let gy = 0; gy < gh; gy++) {
+    const counts = Array.from({ length: gw }, () => new Uint32Array(256));
+    for (let y = gy * bs; y < Math.min(h, gy * bs + bs); y += 2) {
+      invRow(y);
+      for (let x = 0; x < w; x += 2) {
+        const bx = (x / bs) | 0;
+        if (!paper[gy * gw + bx]) continue;
+        const a = cx0[x], b = cx1[x], f = cfx[x], i = (y * w + x) * 4;
+        const lum = data[i] * 77 * (rR[a] + (rR[b] - rR[a]) * f) + data[i + 1] * 150 * (rG[a] + (rG[b] - rG[a]) * f) +
+          data[i + 2] * 29 * (rB[a] + (rB[b] - rB[a]) * f);
+        counts[bx][Math.min(255, (lum * 255 / 256) | 0)]++;
+      }
+    }
+    for (let gx = 0; gx < gw; gx++) {
+      const b = gy * gw + gx, c = counts[gx];
+      if (!paper[b]) continue;
+      let cnt = 0;
+      for (let i = 0; i < 256; i++) cnt += c[i];
+      if (!cnt) continue;
+      let acc = 0, p50 = -1, p84 = 255;
+      for (let i = 0; i < 256; i++) {
+        acc += c[i];
+        if (p50 < 0 && acc >= cnt * 0.5) p50 = i;
+        if (acc >= cnt * 0.84) { p84 = i; break; }
+      }
+      wpGrid[b] = Math.min(1, Math.max(0.9, (p50 - 1.5 * Math.max(0, p84 - p50)) / 255));
+      wpKnown[b] = 1;
+    }
+  }
+  fillFromNeighbors([wpGrid], wpKnown, gw, gh);
+  for (let b = 0; b < G; b++) if (!wpKnown[b]) wpGrid[b] = 1;
+  const wp = gridFilter(gridFilter(wpGrid, gw, gh, false), gw, gh, false);
 
   for (let y = 0; y < h; y++) {
-    const gyf = Math.min(gh - 1, Math.max(0, (y + 0.5) / bs - 0.5));
-    const gy0 = gyf | 0, gy1 = Math.min(gh - 1, gy0 + 1), fy = gyf - gy0;
-    for (let x = 0; x < w; x++) {
-      const gxf = Math.min(gw - 1, Math.max(0, (x + 0.5) / bs - 0.5));
-      const gx0 = gxf | 0, gx1 = Math.min(gw - 1, gx0 + 1), fx = gxf - gx0;
-      const i = (y * w + x) * 4;
-      for (let c = 0; c < 3; c++) {
-        const g = grid[c];
-        const t = g[gy0 * gw + gx0] + (g[gy0 * gw + gx1] - g[gy0 * gw + gx0]) * fx;
-        const b = g[gy1 * gw + gx0] + (g[gy1 * gw + gx1] - g[gy1 * gw + gx0]) * fx;
-        const bg = Math.max(floor, t + (b - t) * fy, 1);
-        data[i + c] = data[i + c] * 255 / bg;
-      }
+    invRow(y);
+    rowOf(wp, y, rW);
+    for (let i = 0; i < gw; i++) { const k = 255 / rW[i]; rR[i] *= k; rG[i] *= k; rB[i] *= k; }
+    let i = y * w * 4;
+    for (let x = 0; x < w; x++, i += 4) {
+      const a = cx0[x], b = cx1[x], f = cfx[x];
+      data[i] *= rR[a] + (rR[b] - rR[a]) * f;
+      data[i + 1] *= rG[a] + (rG[b] - rG[a]) * f;
+      data[i + 2] *= rB[a] + (rB[b] - rB[a]) * f;
     }
   }
   return img;
@@ -676,6 +803,11 @@ function docLook(img) {
     d[i] = l + (r - l) * 1.3;
     d[i + 1] = l + (g - l) * 1.3;
     d[i + 2] = l + (b - l) * 1.3;
+    // Casi blanco y casi sin color → blanco neutro: quita el tinte de la luz y conserva colores reales.
+    const ln = (d[i] + d[i + 1] + d[i + 2]) / 3;
+    const ch = Math.max(d[i], d[i + 1], d[i + 2]) - Math.min(d[i], d[i + 1], d[i + 2]);
+    const t = Math.min(1, Math.max(0, (ln - 190) / 40)) * Math.min(1, Math.max(0, 1 - ch / 70));
+    if (t > 0) { d[i] += (ln - d[i]) * t; d[i + 1] += (ln - d[i + 1]) * t; d[i + 2] += (ln - d[i + 2]) * t; }
   }
   return img;
 }
@@ -694,11 +826,12 @@ function blackWhite(img) {
   const { data: d, width: w, height: h } = img;
   const gray = toGray(img);
   let t = otsu(gray);
-  t = Math.min(215, Math.max(130, t + 15));
-  // Umbral adaptativo local combinado con el global para trazos finos.
+  t = Math.min(205, Math.max(120, t + 15));
+  // Umbral adaptativo local combinado con el global para trazos finos (sin que el grano que
+  // deja una sombra se vuelva puntos negros).
   const local = boxBlur(gray, w, h, Math.max(6, Math.round(Math.max(w, h) / 120)));
   for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
-    const v = gray[p] < t && gray[p] < local[p] - 6 ? 0 : 255;
+    const v = gray[p] < t && gray[p] < local[p] - 8 ? 0 : 255;
     d[i] = d[i + 1] = d[i + 2] = v;
   }
   return img;

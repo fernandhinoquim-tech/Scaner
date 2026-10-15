@@ -8,12 +8,14 @@ en la pantalla de inicio como cualquier app.
 
 - **Rápida**: abre la cámara, detecta la hoja en vivo (contorno azul) y con un toque
   la recorta, endereza y mejora automáticamente. Puedes seguir tomando páginas sin salir de la cámara.
-  La detección busca los bordes rectos de la hoja, así que funciona con sombras y sobre mesas claras.
+  La detección busca los bordes rectos de la hoja (también por diferencias de color), así que funciona
+  con sombras y sobre mesas claras. Si la hoja y la mesa son del mismo blanco, la app avisa y puedes
+  ajustar las esquinas después.
 - **Disparo automático** (botón *Auto*): toma la foto sola cuando la hoja está quieta.
   Ideal para escanear muchas hojas seguidas.
 - **Ilimitado**: sin límite de páginas ni de documentos. Todo se guarda en el propio
   teléfono (nada se sube a internet).
-- **Filtros**: Documento (quita sombras, fondo blanco), Color, Gris, Blanco y negro, Original.
+- **Filtros**: Documento (quita sombras y tintes de luz de color, fondo blanco, conserva fotos y colores), Color, Gris, Blanco y negro, Original.
 - **Edición**: ajustar esquinas con lupa, girar, reordenar y borrar páginas, renombrar documentos.
 - **Formatos de salida**:
   - **PDF** (una o varias páginas; hoja Automática, Carta, A4 u Oficio), con **texto buscable**

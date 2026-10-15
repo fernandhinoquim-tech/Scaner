@@ -160,7 +160,8 @@ svg { width: 22px; height: 22px; flex: none; }
 .shutter.busy span { background: #aaa; }
 .cam-hint {
   position: absolute; left: 0; right: 0; bottom: calc(130px + var(--safe-bottom));
-  text-align: center; margin: 0; font-size: 14px; text-shadow: 0 1px 3px #000;
+  text-align: center; margin: 0; padding: 0 24px; font-size: 14px; line-height: 1.4;
+  text-shadow: 0 1px 3px #000, 0 0 8px #000;
 }
 
 /* Documento */

@@ -265,6 +265,7 @@ function openDocView(mode = 'push') { nav('doc', {}, mode); }
 function openCamera(from) {
   state.cameraFrom = from;
   state.capturedThisSession = 0;
+  state.warnedNoEdges = false;
   updateCamThumb();
   nav('camera');
 }
@@ -436,8 +437,12 @@ function videoRect() {
 
 const maxShift = (a, b) => Math.max(...a.map((p, i) => Math.hypot(p[0] - b[i][0], p[1] - b[i][1])));
 
+const NO_EDGE_HINT = 'No veo los bordes: pon la hoja sobre algo más oscuro, o toma la foto y ajusta las esquinas después';
+
 function liveLoop() {
   const video = $('video');
+  const started = performance.now();
+  let lastSeen = 0;
   const tick = () => {
     if (!stream || state.view !== 'camera') return;
     if (video.videoWidth) {
@@ -454,6 +459,11 @@ function liveLoop() {
         liveCorners = null;
       }
       drawOverlay();
+      if (found) lastSeen = now;
+      // Consejo si no se ve la hoja hace rato (típico: hoja blanca sobre mesa blanca).
+      if (!auto.on) {
+        $('cam-hint').textContent = found ? '' : now - Math.max(started, lastSeen) > 3000 ? NO_EDGE_HINT : 'Apunta al documento';
+      }
       autoCapture(found, now);
     }
     liveTimer = setTimeout(tick, 110);
@@ -489,7 +499,7 @@ function autoCapture(found, now) {
     auto.stableSince = 0;
     auto.last = null;
     if (!found) auto.armed = true;
-    $('cam-hint').textContent = found ? 'Acércate un poco más' : 'Apunta al documento';
+    $('cam-hint').textContent = found ? 'Acércate un poco más' : now - liveAt > 3000 ? NO_EDGE_HINT : 'Apunta al documento';
     return;
   }
   if (!auto.armed) {
@@ -535,6 +545,10 @@ async function capture() {
     const canvas = drawScaled(video, video.videoWidth, video.videoHeight, MAX_ORIGINAL);
     let corners = detectOn(canvas);
     if (!corners && liveCorners && performance.now() - liveAt < 600) corners = liveCorners;
+    if (!corners && !state.warnedNoEdges) {
+      state.warnedNoEdges = true;
+      toast('No encontré los bordes de la hoja: se guardó la foto completa. Toca la página después y usa Recortar.', 6000);
+    }
     await addPage(canvas, corners);
     state.capturedThisSession++;
     updateCamThumb();
