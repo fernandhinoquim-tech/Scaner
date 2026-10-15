@@ -937,6 +937,9 @@ function selectFormat(fmt) {
   let note = '';
   if (isImg && n > 1) note = `Se generarán ${n} imágenes. Al descargar se guardan juntas en un archivo .zip.`;
   if (isText) note = 'Reconoce el texto de las páginas (español e inglés).' + firstTime;
+  if (fmt === 'docx' && /Android/i.test(navigator.userAgent)) {
+    note += ' En Android, Chrome no deja compartir archivos de Word directamente: usa Descargar y envíalo desde tus archivos.';
+  }
   if (fmt === 'pdf') {
     note = `Un solo PDF con ${n} ${n === 1 ? 'página' : 'páginas'}.`;
     if ($('opt-ocr').checked) note += ' Con texto buscable: podrás buscar y copiar palabras.' + firstTime;
@@ -1066,15 +1069,16 @@ function download(name, blob) {
   setTimeout(() => URL.revokeObjectURL(a.href), 60000);
 }
 
+// Guarda los archivos en el teléfono (si son varios, juntos en un .zip).
+async function saveFiles(files) {
+  if (files.length === 1) download(files[0].name, files[0].blob);
+  else download(safeName(state.doc.name) + '.zip', await ex.buildZip(files.map(f => ({ name: f.name, data: f.blob }))));
+  $('export-progress').classList.add('hidden');
+}
+
 $('btn-export-download').addEventListener('click', async () => {
   try {
-    const files = await prepare();
-    if (files.length === 1) download(files[0].name, files[0].blob);
-    else {
-      const zip = await ex.buildZip(files.map(f => ({ name: f.name, data: f.blob })));
-      download(safeName(state.doc.name) + '.zip', zip);
-    }
-    $('export-progress').classList.add('hidden');
+    await saveFiles(await prepare());
     if (exp.notice) toast('Archivo guardado. ' + exp.notice, 8000);
     else toast('Archivo guardado en Descargas');
   } catch (err) {
@@ -1082,30 +1086,44 @@ $('btn-export-download').addEventListener('click', async () => {
   }
 });
 
+// Chrome comparte hasta 10 archivos y solo de ciertos tipos (PDF, imágenes, TXT...; no Word).
+const MAX_SHARE_FILES = 10;
+
 $('btn-export-share').addEventListener('click', async () => {
+  const wasReady = !!exp.prepared;
   let files;
   try {
     files = await prepare();
   } catch (err) {
     return exportFailed(err);
   }
-  const shareFiles = files.map(f => new File([f.blob], f.name, { type: f.blob.type }));
+  const fallback = async (why) => {
+    await saveFiles(files);
+    toast(`${why} Se guardó en Descargas: ábrelo desde ahí para enviarlo.`, 9000);
+  };
+  // Tipo exacto, sin parámetros: Chrome rechaza por ejemplo "text/plain;charset=utf-8".
+  const shareFiles = files.map(f => new File([f.blob], f.name, { type: f.blob.type.split(';')[0] }));
   if (!navigator.canShare || !navigator.canShare({ files: shareFiles })) {
-    toast('Este navegador no permite compartir archivos; se descargarán');
-    return $('btn-export-download').click();
+    return fallback('Este navegador no permite compartir archivos.');
+  }
+  if (shareFiles.length > MAX_SHARE_FILES) {
+    return fallback(`Solo se pueden compartir hasta ${MAX_SHARE_FILES} imágenes a la vez.`);
   }
   try {
     await navigator.share({ files: shareFiles, title: state.doc.name });
     closeExport();
     if (exp.notice) toast(exp.notice, 8000);
   } catch (err) {
-    if (err.name === 'NotAllowedError') {
-      // El permiso de compartir caducó mientras se preparaba (p. ej. OCR largo): un toque más.
+    if (err.name === 'AbortError') return; // se cerró el menú de compartir
+    if (err.name === 'NotAllowedError' && !wasReady && exp.fmt !== 'docx') {
+      // El permiso para compartir caducó mientras se preparaba (p. ej. leyendo el texto): un toque más.
       $('btn-export-share').textContent = 'Listo: toca para compartir';
       $('export-progress').classList.add('hidden');
-    } else if (err.name !== 'AbortError') {
-      toast('No se pudo compartir: ' + err.message);
+      return;
     }
+    // El navegador no deja compartir este tipo de archivo (Chrome no comparte Word, por ejemplo).
+    await fallback(exp.fmt === 'docx' ? 'Tu navegador no permite compartir archivos de Word directamente.'
+      : 'No se pudo compartir este archivo.');
   }
 });
 

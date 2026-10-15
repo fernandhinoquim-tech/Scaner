@@ -19,7 +19,8 @@ en la pantalla de inicio como cualquier app.
   - **PDF** (una o varias páginas; hoja Automática, Carta, A4 u Oficio), con **texto buscable**
     opcional: el PDF se ve igual que el escaneo, pero puedes buscar, seleccionar y copiar palabras
   - **JPG**, **PNG**, **WEBP** (varias páginas se descargan juntas en un `.zip`)
-  - **Word (.docx)** y **TXT** con el texto reconocido (OCR en español e inglés)
+  - **Word (.docx)** y **TXT** con el texto reconocido (OCR en español e inglés).
+    En Android, Chrome no deja compartir Word directamente: se guarda en Descargas y se envía desde ahí.
   - Calidad alta, media o baja (para enviar por WhatsApp o correo)
 - **Compartir** directo a WhatsApp, correo, Drive, etc., o **Descargar** al teléfono.
 - Funciona **sin conexión** después de abrirla la primera vez

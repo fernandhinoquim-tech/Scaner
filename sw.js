@@ -1,5 +1,5 @@
 // Service worker: permite usar la app sin conexión y abrirla al instante.
-const VERSION = 'scaner-v2';
+const VERSION = 'scaner-v3';
 const APP_SHELL = [
   './',
   'index.html',
