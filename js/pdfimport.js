@@ -29,19 +29,26 @@ export const isPdf = (file) => file.type === 'application/pdf' || /\.pdf$/i.test
 
 // Recorre las páginas del PDF: onPage(canvas, número, total) por cada una, en orden.
 // maxSide: lado mayor de la imagen de cada página (≈ 250-300 ppp en una hoja carta).
-export async function renderPdf(file, maxSide, onPage) {
+// askPassword(incorrecta): si el PDF tiene contraseña, la pide (null = no abrirlo).
+export async function renderPdf(file, maxSide, onPage, askPassword) {
   const lib = await loadPdfjs();
-  let pdf;
+  let pdf, task, gaveUp = false;
   try {
-    pdf = await lib.getDocument({
+    task = lib.getDocument({
       data: new Uint8Array(await file.arrayBuffer()),
       cMapUrl: BASE + 'cmaps/',
       cMapPacked: true,
       standardFontDataUrl: BASE + 'standard_fonts/',
       wasmUrl: BASE + 'wasm/',
       iccUrl: BASE + 'iccs/',
-    }).promise;
+    });
+    task.onPassword = async (update, reason) => {
+      const pw = askPassword ? await askPassword(reason === lib.PasswordResponses.INCORRECT_PASSWORD) : null;
+      if (pw == null) { gaveUp = true; task.destroy(); } else update(pw);
+    };
+    pdf = await task.promise;
   } catch (err) {
+    if (gaveUp) throw new PdfImportError('No se abrió el PDF (tiene contraseña).');
     console.warn('PDF:', err);
     if (err && err.name === 'PasswordException') throw new PdfImportError('Ese PDF tiene contraseña: quítasela y vuelve a intentarlo.');
     throw new PdfImportError('No se pudo abrir el PDF (puede estar dañado).');
@@ -59,6 +66,6 @@ export async function renderPdf(file, maxSide, onPage) {
       await onPage(canvas, n, pdf.numPages);
     }
   } finally {
-    pdf.destroy();
+    task.destroy(); // libera la memoria del documento y su proceso
   }
 }

@@ -24,6 +24,11 @@
       <button id="btn-install" class="chip hidden" type="button">Instalar app</button>
     </header>
     <main class="home-main">
+      <div id="search-box" class="search-box hidden">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M15.5 15.5L21 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <input id="search" type="search" placeholder="Buscar por nombre o por texto" autocomplete="off" enterkeyhint="search" aria-label="Buscar en tus documentos">
+      </div>
+      <p id="search-status" class="search-status hidden"></p>
       <div id="doc-list" class="doc-list"></div>
       <div id="empty" class="empty hidden">
         <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M18 8h20l12 12v34a2 2 0 0 1-2 2H18a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2z" fill="none" stroke="currentColor" stroke-width="3"/><path d="M38 8v12h12M23 32h18M23 40h18M23 48h12" stroke="currentColor" stroke-width="3" fill="none"/></svg>
@@ -32,6 +37,10 @@
       <label class="setting">
         <input type="checkbox" id="opt-autostart">
         <span>Abrir la cámara al iniciar la app</span>
+      </label>
+      <label class="setting">
+        <input type="checkbox" id="opt-bgocr">
+        <span>Leer el texto de las páginas automáticamente (para buscar, poner nombre y enderezar páginas)</span>
       </label>
     </main>
     <div class="home-actions">
@@ -63,8 +72,13 @@
       </button>
       <div class="cam-toggles">
         <button id="btn-auto" class="chip dark" type="button" aria-pressed="false">Auto: NO</button>
+        <button id="btn-idsize" class="chip dark hidden" type="button">Tamaño real</button>
         <button id="btn-torch" class="chip dark hidden" type="button" aria-pressed="false">Flash: NO</button>
       </div>
+    </div>
+    <div class="cam-modes" role="group" aria-label="Qué vas a escanear">
+      <button data-mode="doc" type="button" class="selected">Documento</button>
+      <button data-mode="id" type="button">Cédula</button>
     </div>
     <div class="cam-bottom">
       <button id="btn-cam-thumb" class="cam-thumb" type="button" aria-label="Ver páginas">
@@ -84,13 +98,18 @@
         <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
       <input id="doc-title" class="title-input" aria-label="Nombre del documento">
-      <button id="btn-doc-delete" class="icon-btn" type="button" aria-label="Eliminar documento">
-        <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+      <button id="btn-doc-menu" class="icon-btn" type="button" aria-label="Más opciones">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2" fill="currentColor"/><circle cx="12" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="19" r="2" fill="currentColor"/></svg>
       </button>
     </header>
     <p id="doc-info" class="doc-info"></p>
     <main id="page-grid" class="page-grid"></main>
-    <div class="doc-actions">
+    <div id="select-bar" class="doc-actions hidden">
+      <button id="btn-sel-cancel" class="btn secondary" type="button">Cancelar</button>
+      <button id="btn-sel-delete" class="btn secondary" type="button">Eliminar</button>
+      <button id="btn-sel-move" class="btn primary" type="button">Mover a…</button>
+    </div>
+    <div id="doc-bar" class="doc-actions">
       <button id="btn-doc-cam" class="btn secondary" type="button">+ Cámara</button>
       <button id="btn-doc-import" class="btn secondary" type="button">+ Archivos</button>
       <button id="btn-doc-export" class="btn primary" type="button">Guardar / Compartir</button>
@@ -111,6 +130,7 @@
     <div id="edit-stage" class="edit-stage">
       <img id="edit-result" alt="Resultado">
       <canvas id="crop-canvas" class="hidden"></canvas>
+      <div id="sign-layer" class="sign-layer hidden"></div>
       <div id="edit-busy" class="spinner hidden"></div>
     </div>
     <div id="edit-tools" class="edit-tools">
@@ -125,8 +145,15 @@
         <button id="btn-rot-l" class="tool" type="button">⟲<small>Girar</small></button>
         <button id="btn-crop" class="tool" type="button">⌗<small>Recortar</small></button>
         <button id="btn-rot-r" class="tool" type="button">⟳<small>Girar</small></button>
-        <button id="btn-move-l" class="tool" type="button">◀<small>Mover</small></button>
-        <button id="btn-move-r" class="tool" type="button">▶<small>Mover</small></button>
+        <button id="btn-text" class="tool" type="button">Aa<small>Texto</small></button>
+        <button id="btn-sign" class="tool" type="button">✍<small>Firmar</small></button>
+      </div>
+    </div>
+    <div id="sign-tools" class="edit-tools hidden">
+      <p class="crop-hint">Arrastra la firma a su lugar. Usa el círculo de la esquina para agrandarla o achicarla.</p>
+      <div class="tool-row">
+        <button id="btn-sign-add" class="btn secondary dark" type="button">+ Otra firma</button>
+        <button id="btn-sign-ok" class="btn primary" type="button">Listo</button>
       </div>
     </div>
     <div id="crop-tools" class="edit-tools hidden">
@@ -164,6 +191,14 @@
         <span>Texto buscable (OCR)<small>Permite buscar y copiar palabras dentro del PDF</small></span>
         <input type="checkbox" id="opt-ocr">
       </label>
+      <label class="opt-row check" id="opt-pass-row">
+        <span>Proteger con contraseña<small>Pedirá la contraseña para abrir el PDF</small></span>
+        <input type="checkbox" id="opt-pass">
+      </label>
+      <div class="pass-fields hidden" id="pass-fields">
+        <input id="pdf-pass" class="text-input" type="password" placeholder="Escribe la contraseña" autocomplete="new-password" aria-label="Contraseña del PDF">
+        <button id="btn-pass-show" class="chip" type="button" aria-pressed="false">Ver</button>
+      </div>
       <div class="opt-row" id="opt-quality">
         <span>Calidad</span>
         <select id="sel-quality">
@@ -197,9 +232,102 @@
     </div>
   </div>
 
+  <!-- Menú del documento -->
+  <div id="sheet-menu" class="sheet-backdrop hidden">
+    <div class="sheet menu" role="dialog" aria-label="Opciones del documento">
+      <button id="m-select" type="button"><b>Seleccionar páginas</b><small>Para moverlas a otro documento o eliminar varias</small></button>
+      <button id="m-merge" type="button"><b>Unir otro documento a este</b><small>Sus páginas se agregan al final</small></button>
+      <button id="m-text" type="button"><b>Copiar el texto</b><small>Todo el texto del documento, para pegarlo donde quieras</small></button>
+      <button id="m-delete" type="button" class="danger"><b>Eliminar documento</b></button>
+      <button id="m-cancel" type="button" class="cancel">Cancelar</button>
+    </div>
+  </div>
+
+  <!-- Elegir documento (mover páginas / unir) -->
+  <div id="sheet-pick" class="sheet-backdrop hidden">
+    <div class="sheet" role="dialog" aria-labelledby="pick-title">
+      <h2 id="pick-title">Mover a…</h2>
+      <div id="pick-list" class="pick-list"></div>
+      <div class="sheet-actions">
+        <button id="btn-pick-cancel" class="btn secondary" type="button">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Texto de la página o del documento -->
+  <div id="sheet-text" class="sheet-backdrop hidden">
+    <div class="sheet" role="dialog" aria-labelledby="text-title">
+      <h2 id="text-title">Texto</h2>
+      <div class="seg" id="text-scope">
+        <button data-scope="page" type="button" class="selected">Esta página</button>
+        <button data-scope="doc" type="button">Todo el documento</button>
+      </div>
+      <div id="text-progress" class="progress hidden"><div></div><span></span></div>
+      <textarea id="text-out" class="text-out" rows="11" aria-label="Texto reconocido"></textarea>
+      <p id="text-note" class="export-note"></p>
+      <div class="sheet-actions">
+        <button id="btn-text-close" class="btn secondary" type="button">Cerrar</button>
+        <button id="btn-text-share" class="btn secondary" type="button">Compartir</button>
+        <button id="btn-text-copy" class="btn primary" type="button">Copiar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pedir contraseña (PDF importado) -->
+  <div id="sheet-pass" class="sheet-backdrop hidden">
+    <form id="pass-form" class="sheet" role="dialog" aria-labelledby="pass-title">
+      <h2 id="pass-title">Este PDF tiene contraseña</h2>
+      <p id="pass-note" class="export-note"></p>
+      <input id="pass-input" class="text-input" type="password" autocomplete="current-password" aria-label="Contraseña">
+      <div class="sheet-actions">
+        <button id="btn-pass-cancel" class="btn secondary" type="button">Cancelar</button>
+        <button class="btn primary" type="submit">Abrir</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Elegir firma -->
+  <div id="sheet-sigs" class="sheet-backdrop hidden">
+    <div class="sheet" role="dialog" aria-labelledby="sigs-title">
+      <h2 id="sigs-title">Elige tu firma</h2>
+      <div id="sig-list" class="sig-list"></div>
+      <div class="insert-options">
+        <button id="btn-sig-draw" class="btn primary" type="button">Dibujar una firma nueva</button>
+        <button id="btn-sig-photo" class="btn secondary" type="button">Usar foto de mi firma en papel</button>
+      </div>
+      <p class="export-note">Para la foto: firma con lapicero oscuro en una hoja blanca y tómala de cerca.</p>
+      <div class="sheet-actions">
+        <button id="btn-sigs-cancel" class="btn secondary" type="button">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dibujar firma -->
+  <div id="sheet-pad" class="sheet-backdrop hidden">
+    <div class="sheet" role="dialog" aria-labelledby="pad-title">
+      <h2 id="pad-title">Firma con el dedo</h2>
+      <div class="pad-wrap">
+        <canvas id="sig-pad" class="sig-pad"></canvas>
+        <span class="pad-line">Firma sobre la línea</span>
+      </div>
+      <div class="pad-tools">
+        <div class="seg small" id="sig-ink">
+          <button data-ink="azul" type="button" class="selected">Azul</button>
+          <button data-ink="negro" type="button">Negro</button>
+        </div>
+        <button id="btn-pad-clear" class="chip" type="button">Borrar</button>
+      </div>
+      <div class="sheet-actions">
+        <button id="btn-pad-cancel" class="btn secondary" type="button">Cancelar</button>
+        <button id="btn-pad-ok" class="btn primary" type="button">Usar firma</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast"></div>
   <input id="file-input" type="file" accept="image/*,application/pdf,.pdf" multiple hidden>
   <input id="native-cam-input" type="file" accept="image/*" capture="environment" hidden>
+  <input id="sig-photo-input" type="file" accept="image/*" capture="environment" hidden>
 
   <script type="module" src="js/app.js"></script>
 </body>

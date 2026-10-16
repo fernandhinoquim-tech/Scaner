@@ -13,6 +13,8 @@ en la pantalla de inicio como cualquier app.
   ajustar las esquinas después.
 - **Disparo automático** (botón *Auto*): toma la foto sola cuando la hoja está quieta.
   Ideal para escanear muchas hojas seguidas.
+- **Modo cédula**: en la cámara elige *Cédula*, toma el frente y el reverso de la tarjeta (cédula,
+  licencia, carné) y quedan juntos en una hoja carta, a **tamaño real** o **ampliada al 150 %**.
 - **Ilimitado**: sin límite de páginas ni de documentos. Todo se guarda en el propio
   teléfono (nada se sube a internet).
 - **Filtros**: Documento (quita sombras y tintes de luz de color, fondo blanco, conserva fotos y colores), Color, Gris, Blanco y negro, Original.
@@ -24,9 +26,24 @@ en la pantalla de inicio como cualquier app.
   La primera vez que se importa un PDF se descarga el lector de PDF (unos 2 MB).
 - **Insertar páginas en medio**: el botón **＋** de cada página abre *Insertar después de la
   página N*: puedes tomar fotos o subir imágenes/PDF y quedan justo en ese lugar.
+  Si el PDF tiene contraseña, la app la pide.
+- **Unir documentos y mover páginas** (menú ⋮ del documento): *Unir otro documento a este*, o
+  *Seleccionar páginas* para pasarlas a otro documento (o a uno nuevo) o eliminar varias a la vez.
+- **Buscar** en la pantalla principal por el nombre o por el **texto de adentro** de tus documentos
+  (sin importar tildes ni mayúsculas): muestra el fragmento encontrado y abre la página.
+- **Nombre automático**: un documento nuevo se nombra solo con el título de su primera página
+  (o con el nombre del PDF importado). Se puede cambiar tocando el nombre.
+- **Enderezar solas** las páginas que quedaron de lado o al revés (salvo que las hayas girado a mano).
+- **Firmar**: en una página toca *Firmar*, dibuja tu firma con el dedo o usa una **foto de tu firma
+  en papel** (la app separa la tinta del papel). Se mueve y se agranda con el dedo, y queda guardada
+  para la próxima vez.
+- **Copiar el texto** de una página o de todo el documento (*Texto* en el editor, o menú ⋮) para
+  pegarlo en WhatsApp o un correo; se puede corregir antes de copiar.
 - **Formatos de salida**:
   - **PDF** (una o varias páginas; hoja Automática, Carta, A4 u Oficio), con **texto buscable**
-    opcional: el PDF se ve igual que el escaneo, pero puedes buscar, seleccionar y copiar palabras
+    opcional: el PDF se ve igual que el escaneo, pero puedes buscar, seleccionar y copiar palabras.
+    También se puede **proteger con contraseña** (cifrado AES de 256 bits, el estándar actual que abren
+    Adobe, Chrome, Android, iPhone y Windows). La contraseña no se guarda en la app.
   - **JPG**, **PNG**, **WEBP** (varias páginas se descargan juntas en un `.zip`)
   - **Word (.docx)** y **TXT** con el texto reconocido (OCR en español e inglés).
     En Android, Chrome no deja compartir Word directamente: se guarda en Descargas y se envía desde ahí.
@@ -45,6 +62,9 @@ en la pantalla de inicio como cualquier app.
   esto bajó los errores de lectura de ~6,8 % a ~0,1 % de los caracteres.
 - Detecta páginas **de lado o al revés** y las lee en el sentido correcto (y te avisa para que
   puedas enderezarlas).
+- **Lectura automática**: después de escanear, la app lee el texto en segundo plano (para buscar,
+  poner nombre y enderezar). Se pausa con la cámara abierta, al exportar y con la app cerrada, y se
+  puede desactivar en la pantalla principal. Sin internet, espera a tenerlo la primera vez.
 - El texto leído se guarda con cada página: volver a exportar en PDF, TXT o Word es instantáneo.
   Solo se vuelve a leer una página si cambias su recorte o la giras.
 - Puedes **detener** la lectura en cualquier momento. Si no hay internet la primera vez, el PDF
@@ -78,12 +98,16 @@ js/imgproc.js         Detección de bordes, corrección de perspectiva, filtros 
 js/worker.js          Procesa las imágenes en segundo plano
 js/ocr.js             Lector de texto (Tesseract.js): carga, lectura, cancelación
 js/pdfimport.js       Importación de PDF (pdf.js): convierte cada página en imagen
+js/pdfcrypt.js        Cifrado del PDF con contraseña (AES-256, WebCrypto)
+js/text.js            Título automático y búsqueda por texto
+js/sign.js            Firmas: dibujar, extraer de una foto y estampar en la página
+js/idcard.js          Modo cédula: frente y reverso en una hoja
 js/export.js          Generación de PDF (con capa de texto), ZIP, DOCX y TXT
 js/db.js              Almacenamiento local (IndexedDB)
 sw.js                 Funcionamiento sin conexión
 manifest.webmanifest  Datos para instalar la app
 ```
 
-No usa librerías ni proceso de compilación; el PDF (incluida su capa de texto) y el ZIP se generan
-con código propio. El OCR usa Tesseract.js y la importación de PDF usa pdf.js; ambos se descargan
+No usa librerías ni proceso de compilación; el PDF (incluidos su capa de texto y su cifrado) y el
+ZIP se generan con código propio. El OCR usa Tesseract.js y la importación de PDF usa pdf.js; ambos se descargan
 solo al usarlos.

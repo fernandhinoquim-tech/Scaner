@@ -1,6 +1,7 @@
 // Exportación a PDF (con texto buscable opcional), imágenes (JPG/PNG/WEBP), ZIP, TXT y Word (.docx).
 // PDF y ZIP se generan aquí mismo, sin librerías externas, para que funcione sin conexión.
 import { ocrText } from './ocr.js';
+import { pdfEncryption } from './pdfcrypt.js';
 
 const enc = new TextEncoder();
 
@@ -113,14 +114,16 @@ export function textLayer(ocr, dx, dy, dw, dh) {
 }
 
 // Texto del PDF (título) en UTF-16 para admitir tildes y eñes.
-function pdfString(s) {
-  let h = 'FEFF';
-  for (let i = 0; i < s.length; i++) h += s.charCodeAt(i).toString(16).padStart(4, '0');
-  return `<${h.toUpperCase()}>`;
-}
+const utf16 = (s) => {
+  const b = [0xFE, 0xFF];
+  for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); b.push(c >> 8, c & 0xFF); }
+  return new Uint8Array(b);
+};
+const hexOf = (bytes) => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
 
 // pages: con .processed (JPEG) y, si textLayer, .ocr (texto con posiciones).
-export async function buildPdf(pages, { size = 'auto', quality = 'alta', title = '', textLayer: withText = false } = {}, onProgress) {
+// password: si se da, el PDF queda cifrado (AES-256) y pide la contraseña para abrirse.
+export async function buildPdf(pages, { size = 'auto', quality = 'alta', title = '', textLayer: withText = false, password = '' } = {}, onProgress) {
   const parts = [];
   const offsets = [];
   let length = 0;
@@ -135,14 +138,23 @@ export async function buildPdf(pages, { size = 'auto', quality = 'alta', title =
     for (const b of [].concat(body)) push(b);
     push('\nendobj\n');
   };
+  const crypt = password ? await pdfEncryption(password) : null;
+  // Con contraseña, cada flujo y cada cadena van cifrados.
+  const stream = async (dict, data) => {
+    const bytes = typeof data === 'string' ? enc.encode(data) : data;
+    const body = crypt ? await crypt.encrypt(bytes) : bytes;
+    return [`<< ${dict}/Length ${body.length} >>\nstream\n`, body, '\nendstream'];
+  };
+  const str = async (bytes) => `<${hexOf(crypt ? await crypt.encrypt(bytes) : bytes)}>`;
 
-  push('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n');
+  push(`%PDF-${crypt ? '1.7' : '1.4'}\n%\xE2\xE3\xCF\xD3\n`);
   const n = pages.length;
   const pageObj = i => 5 + i * 3;
   const kids = pages.map((_, i) => `${pageObj(i)} 0 R`).join(' ');
-  obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
+  // AES-256 es una extensión de PDF 1.7 (nivel 8 de Adobe).
+  obj(1, `<< /Type /Catalog /Pages 2 0 R${crypt ? ' /Extensions << /ADBE << /BaseVersion /1.7 /ExtensionLevel 8 >> >>' : ''} >>`);
   obj(2, `<< /Type /Pages /Kids [${kids}] /Count ${n} >>`);
-  obj(3, `<< /Title ${pdfString(title)} /Producer (Scaner) >>`);
+  obj(3, `<< /Title ${await str(utf16(title))} /Producer ${await str(enc.encode('Scaner'))} >>`);
   obj(4, '<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>');
 
   for (let i = 0; i < n; i++) {
@@ -171,19 +183,24 @@ export async function buildPdf(pages, { size = 'auto', quality = 'alta', title =
     const p = pageObj(i);
     obj(p, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pw.toFixed(2)} ${ph.toFixed(2)}] ` +
       `/Resources << /XObject << /Im0 ${p + 2} 0 R >> /Font << /F1 4 0 R >> >> /Contents ${p + 1} 0 R >>`);
-    obj(p + 1, [`<< /Length ${content.length} >>\nstream\n`, content, '\nendstream']);
-    obj(p + 2, [`<< /Type /XObject /Subtype /Image /Width ${width} /Height ${height} ` +
-      `/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`,
-      jpeg, '\nendstream']);
+    obj(p + 1, await stream('', content));
+    obj(p + 2, await stream(`/Type /XObject /Subtype /Image /Width ${width} /Height ${height} ` +
+      '/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode ', jpeg));
     onProgress && onProgress((i + 1) / n);
   }
 
-  const total = 5 + n * 3;
+  let total = 5 + n * 3;
+  let trailer = '';
+  if (crypt) {
+    obj(total, crypt.dict);
+    trailer = ` /Encrypt ${total} 0 R /ID [<${crypt.id}> <${crypt.id}>]`;
+    total++;
+  }
   const xref = length;
   let table = `xref\n0 ${total}\n0000000000 65535 f \n`;
   for (let i = 1; i < total; i++) table += String(offsets[i]).padStart(10, '0') + ' 00000 n \n';
   push(table);
-  push(`trailer\n<< /Size ${total} /Root 1 0 R /Info 3 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+  push(`trailer\n<< /Size ${total} /Root 1 0 R /Info 3 0 R${trailer} >>\nstartxref\n${xref}\n%%EOF\n`);
   return new Blob(parts, { type: 'application/pdf' });
 }
 

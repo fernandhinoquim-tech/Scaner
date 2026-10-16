@@ -467,8 +467,17 @@ function refineQuad(q, { ang }, w, h, polarity) {
   return out;
 }
 
+// Forma de tarjeta (cédula, carné): proporción ~1,59 entre lados, con margen por la perspectiva.
+function cardShape(q) {
+  const len = i => Math.hypot(q[(i + 1) % 4][0] - q[i][0], q[(i + 1) % 4][1] - q[i][1]);
+  const a = (len(0) + len(2)) / 2, b = (len(1) + len(3)) / 2;
+  const r = Math.max(a, b) / Math.min(a, b);
+  return r >= 1.3 && r <= 1.95;
+}
+
 // Detecta el documento en una imagen pequeña (~240-400 px). Devuelve 4 esquinas normalizadas (0..1) o null.
-export function detectDocument(img) {
+// card: buscar solo cuadriláteros con forma de tarjeta (modo cédula).
+export function detectDocument(img, { card = false } = {}) {
   const { width: w, height: h } = img;
   const gray = toGray(img);
   const edges = edgeMap(img, w, h);
@@ -487,7 +496,7 @@ export function detectDocument(img) {
       if (Math.min(angDiff180(L[a].t, L[c].t), angDiff180(L[a].t, L[d].t),
         angDiff180(L[b].t, L[c].t), angDiff180(L[b].t, L[d].t)) < 45) continue;
       const q = [intersect(L[a], L[c]), intersect(L[a], L[d]), intersect(L[b], L[d]), intersect(L[b], L[c])];
-      if (q.some(pt => !pt) || !validQuad(q, w, h)) continue;
+      if (q.some(pt => !pt) || !validQuad(q, w, h) || (card && !cardShape(q))) continue;
       quads.push({ q, votes: L[a].v + L[b].v + L[c].v + L[d].v });
     }
   }
@@ -505,10 +514,15 @@ export function detectDocument(img) {
     top.sort((a, b) => b.score - a.score);
     if (top.length > K) top.pop();
   }
-  let best = top.find(c => !cutsContent(c.q, edges, w, h)) || null;
+  // Tarjetas: entre los buenos candidatos, la más grande (los recuadros de adentro, como la
+  // foto o una franja de color, también tienen forma de tarjeta pero son más chicos).
+  let best = card
+    ? top.filter(c => !cutsContent(c.q, edges, w, h)).sort((a, b) => polyArea(b.q) - polyArea(a.q))[0] || null
+    : top.find(c => !cutsContent(c.q, edges, w, h)) || null;
   if (!best) {
     // Respaldo (p. ej. hojas curvas): la mancha clara más grande, validada con el mismo criterio.
-    const bq = detectByBrightness(gray, w, h);
+    let bq = detectByBrightness(gray, w, h);
+    if (bq && card && !cardShape(bq)) bq = null;
     const sup = bq && quadSupport(bq, edges, w, h);
     if (accepted(sup) && !cutsContent(bq, edges, w, h)) best = { q: bq, ...sup };
   }
