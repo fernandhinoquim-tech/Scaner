@@ -1,9 +1,9 @@
 // Abre documentos PDF y convierte cada página en una imagen, para escanear, reordenar e insertar
-// páginas entre ellas. Usa pdf.js (el lector de PDF de Firefox), que se descarga solo la primera
-// vez que se importa un PDF (unos 2 MB) y después queda guardado.
+// páginas entre ellas. Usa pdf.js (el lector de PDF de Firefox), incluido en la app (carpeta vendor/,
+// copia verificada del paquete oficial). Se descarga del mismo sitio de la app la primera vez que se
+// importa un PDF (unos 2 MB) y después queda guardado.
 
-const VERSION = '6.4.299';
-const BASE = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${VERSION}/`;
+const BASE = new URL('../vendor/pdfjs-6.4.299/', import.meta.url).href;
 
 export class PdfImportError extends Error {}
 
@@ -11,9 +11,9 @@ let libPromise = null;
 
 function loadPdfjs() {
   if (!libPromise) {
-    libPromise = import(BASE + 'legacy/build/pdf.min.mjs')
+    libPromise = import(BASE + 'pdf.min.js')
       .then((lib) => {
-        lib.GlobalWorkerOptions.workerSrc = BASE + 'legacy/build/pdf.worker.min.mjs';
+        lib.GlobalWorkerOptions.workerSrc = BASE + 'pdf.worker.min.js';
         return lib;
       })
       .catch((err) => {
@@ -41,6 +41,9 @@ export async function renderPdf(file, maxSide, onPage, askPassword) {
       standardFontDataUrl: BASE + 'standard_fonts/',
       wasmUrl: BASE + 'wasm/',
       iccUrl: BASE + 'iccs/',
+      // Defensa ante PDF maliciosos: nunca generar ni ejecutar código a partir del archivo.
+      isEvalSupported: false,
+      enableXfa: false,
     });
     task.onPassword = async (update, reason) => {
       const pw = askPassword ? await askPassword(reason === lib.PasswordResponses.INCORRECT_PASSWORD) : null;

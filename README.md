@@ -50,12 +50,14 @@ en la pantalla de inicio como cualquier app.
   - Calidad alta, media o baja (para enviar por WhatsApp o correo)
 - **Compartir** directo a WhatsApp, correo, Drive, etc., o **Descargar** al teléfono.
 - Funciona **sin conexión** después de abrirla la primera vez
-  (el OCR necesita internet solo la primera vez, para descargar el lector de texto: unos 9 MB).
+  (el OCR necesita internet solo la primera vez, para descargar el lector de texto desde el mismo
+  sitio de la app: unos 9 MB).
 
 ## Lectura de texto (OCR)
 
 - Usa [Tesseract.js](https://github.com/naptha/tesseract.js) 7 con español + inglés, dentro del
-  teléfono: tus documentos no se envían a ningún servidor.
+  teléfono: tus documentos no se envían a ningún servidor. La librería viene incluida en la app
+  (carpeta `vendor/`), así que tampoco se descarga nada de otros sitios.
 - Antes de leer, la app prepara una imagen especial a la máxima resolución disponible: gris,
   con la iluminación aplanada (quita sombras) y el blanco del papel ajustado según el ruido de
   cada zona. En fotos de prueba generadas por computadora (con sombras, desenfoque y poca luz),
@@ -71,6 +73,29 @@ en la pantalla de inicio como cualquier app.
   se guarda igual (sin texto buscable) y la app lo avisa.
 - Límites: la letra a mano y las tablas complejas se leen mal; el texto se copia en el orden de
   los renglones, sin el formato original.
+
+## Seguridad y privacidad
+
+- **Tus documentos no salen del teléfono** salvo que tú los compartas o descargues. No hay servidor,
+  cuentas ni contraseñas guardadas en ningún lado: no hay nada que "hackear" a distancia.
+- **La app no se conecta a ningún otro servidor.** Todo su código, incluidos el lector de texto
+  (Tesseract.js) y el de PDF (pdf.js), está en este repositorio: las librerías se copiaron sin cambios
+  desde los paquetes oficiales y se comprobó su huella digital (ver `vendor/README.md`).
+- **Política de seguridad (CSP)**: el navegador solo deja que la app cargue código y se conecte a su
+  propio sitio. Aunque alguien lograra meter un texto malicioso (por ejemplo en el nombre de un PDF),
+  no podría ejecutar código ni enviar tus documentos a otro lado.
+- **Archivos que importas**: los PDF se leen sin ejecutar nada de su contenido (pdf.js sin scripts ni
+  generación de código) y todo funciona dentro del aislamiento del navegador.
+- **PDF con contraseña**: cifrado AES de 256 bits (el estándar actual). Usa una contraseña larga.
+
+Recomendaciones:
+
+1. **Bloqueo de pantalla** en el teléfono: los documentos se guardan dentro del navegador, como las
+   fotos en la galería; quien tenga el teléfono desbloqueado puede abrir la app.
+2. **Verificación en dos pasos en GitHub**: la app se actualiza desde este repositorio, así que quien
+   controle la cuenta de GitHub controla la app.
+3. **Copias de lo importante**: si borras los datos del navegador, desinstalas la app o pierdes el
+   teléfono, los documentos se pierden. Exporta en PDF los que necesites conservar.
 
 ## Cómo publicarla (desde el celular, sin PC)
 
@@ -106,8 +131,9 @@ js/export.js          Generación de PDF (con capa de texto), ZIP, DOCX y TXT
 js/db.js              Almacenamiento local (IndexedDB)
 sw.js                 Funcionamiento sin conexión
 manifest.webmanifest  Datos para instalar la app
+vendor/               Tesseract.js y pdf.js (copias verificadas de los paquetes oficiales; ver vendor/README.md)
 ```
 
-No usa librerías ni proceso de compilación; el PDF (incluidos su capa de texto y su cifrado) y el
-ZIP se generan con código propio. El OCR usa Tesseract.js y la importación de PDF usa pdf.js; ambos se descargan
-solo al usarlos.
+No tiene proceso de compilación; el PDF (incluidos su capa de texto y su cifrado) y el ZIP se generan
+con código propio. El OCR usa Tesseract.js y la importación de PDF usa pdf.js, incluidos en `vendor/`;
+el teléfono los descarga del mismo sitio de la app solo la primera vez que se usan.

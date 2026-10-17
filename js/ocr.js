@@ -1,8 +1,9 @@
-// Lector de texto (OCR) con Tesseract.js. Se descarga solo cuando se usa (unos 9 MB la primera
-// vez: motor + español + inglés) y después queda guardado en el teléfono.
+// Lector de texto (OCR) con Tesseract.js, incluido en la app (carpeta vendor/, copia verificada del
+// paquete oficial): nada se pide a otros servidores. Se descarga del mismo sitio de la app solo
+// cuando se usa (unos 9 MB la primera vez: motor + español + inglés) y después queda guardado.
 
-const VERSION = '7.0.0';
-const SCRIPT_URL = `https://cdn.jsdelivr.net/npm/tesseract.js@${VERSION}/dist/tesseract.min.js`;
+const BASE = new URL('../vendor/tesseract-7.0.0/', import.meta.url).href;
+const SCRIPT_URL = BASE + 'tesseract.min.js';
 const LANGS = 'spa+eng';
 const IDLE_MS = 90000; // libera la memoria del lector tras un rato sin uso
 
@@ -28,7 +29,6 @@ function loadScript() {
     scriptPromise = new Promise((resolve, reject) => {
       const s = document.createElement('script');
       s.src = SCRIPT_URL;
-      s.crossOrigin = 'anonymous';
       s.onload = () => (window.Tesseract ? resolve(window.Tesseract) : reject(new OcrUnavailableError(UNAVAILABLE)));
       s.onerror = () => {
         scriptPromise = null;
@@ -48,6 +48,10 @@ function getWorker() {
       // Si falla la descarga del idioma, Tesseract.js no rechaza: solo avisa por errorHandler.
       initFailed = () => reject(new OcrUnavailableError(UNAVAILABLE));
       Tesseract.createWorker(LANGS, 1, {
+        workerPath: BASE + 'worker.min.js',
+        corePath: BASE + 'core',  // carpeta: Tesseract elige el motor que soporte el teléfono
+        langPath: BASE + 'lang',
+        workerBlobURL: false,     // proceso normal del mismo sitio (la política de seguridad no admite blob:)
         logger: (m) => listener && listener(m),
         errorHandler: (err) => {
           console.warn('OCR:', err);

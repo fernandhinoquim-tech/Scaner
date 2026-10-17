@@ -33,8 +33,13 @@ function open() {
       };
       req.onsuccess = () => {
         const db = req.result;
-        // Si otra pestaña abre una versión más nueva, se cierra esta conexión para no bloquearla.
-        db.onversionchange = () => db.close();
+        // Si otra pestaña abre una versión más nueva, se cierra esta conexión para no bloquearla y
+        // se avisa a la app (hay que recargarla para seguir guardando).
+        db.onversionchange = () => {
+          db.close();
+          dbPromise = null;
+          window.dispatchEvent(new Event('scaner-db-closed'));
+        };
         resolve(db);
       };
       req.onerror = () => reject(req.error);

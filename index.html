@@ -2,6 +2,8 @@
 <html lang="es">
 <head>
   <meta charset="utf-8">
+  <!-- Política de seguridad: la app solo puede cargar código y conectarse a su propio sitio. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self'; connect-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#1c5cff">
   <meta name="description" content="Escanea documentos con la cámara del celular y guárdalos en PDF, JPG, PNG, Word o texto.">
@@ -42,6 +44,7 @@
         <input type="checkbox" id="opt-bgocr">
         <span>Leer el texto de las páginas automáticamente (para buscar, poner nombre y enderezar páginas)</span>
       </label>
+      <p class="app-version">Versión 7 · Tus documentos se guardan solo en este teléfono.</p>
     </main>
     <div class="home-actions">
       <button id="btn-import-home" class="btn secondary" type="button">

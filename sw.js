@@ -1,5 +1,5 @@
 // Service worker: permite usar la app sin conexión y abrirla al instante.
-const VERSION = 'scaner-v6';
+const VERSION = 'scaner-v7';
 const APP_SHELL = [
   './',
   'index.html',
@@ -29,15 +29,18 @@ self.addEventListener('install', (e) => {
     .then(() => self.skipWaiting()));
 });
 
-// Lector de texto y de PDF de las versiones en uso (lo demás se borra al actualizar).
-const CDN_CURRENT = /tesseract\.js(-core)?@v?7\.0\.0\/|pdfjs-dist@6\.4\.299\//;
+// Lector de texto y de PDF incluidos en la app (vendor/), versiones en uso: se guardan la primera vez
+// que se usan y sobreviven a las actualizaciones de la app (lo de otras versiones se borra).
+const VENDOR_CACHE = 'scaner-vendor';
+const VENDOR_CURRENT = /\/vendor\/(tesseract-7\.0\.0|pdfjs-6\.4\.299)\//;
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== VERSION && k !== 'scaner-cdn').map(k => caches.delete(k))))
-      .then(() => caches.open('scaner-cdn'))
-      .then(cdn => cdn.keys().then(reqs => Promise.all(reqs.filter(r => !CDN_CURRENT.test(r.url)).map(r => cdn.delete(r)))))
+      // Borra las versiones viejas de la app y la caché del CDN que se usaba antes.
+      .then(keys => Promise.all(keys.filter(k => k !== VERSION && k !== VENDOR_CACHE).map(k => caches.delete(k))))
+      .then(() => caches.open(VENDOR_CACHE))
+      .then(c => c.keys().then(reqs => Promise.all(reqs.filter(r => !VENDOR_CURRENT.test(r.url)).map(r => c.delete(r)))))
       .then(() => self.clients.claim())
   );
 });
@@ -47,20 +50,21 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
 
+  if (url.origin !== location.origin) return;
+
   // Lectores de texto (Tesseract) y de PDF (pdf.js), versiones fijas: se descargan una vez y quedan.
-  // Se pide siempre con CORS para poder comprobar que la respuesta es válida antes de guardarla.
   // Los idiomas no se guardan aquí: Tesseract ya los guarda en su propia base de datos.
-  if (url.hostname === 'cdn.jsdelivr.net' && CDN_CURRENT.test(url.pathname)) {
-    e.respondWith(caches.open('scaner-cdn').then(async cache => {
-      const hit = await cache.match(url.href);
+  if (VENDOR_CURRENT.test(url.pathname)) {
+    if (url.pathname.endsWith('.traineddata.gz')) return;
+    e.respondWith(caches.open(VENDOR_CACHE).then(async cache => {
+      const hit = await cache.match(url.pathname);
       if (hit) return hit;
-      const res = await fetch(url.href, { mode: 'cors', credentials: 'omit' });
-      if (res.ok) cache.put(url.href, res.clone()).catch(() => {});
+      const res = await fetch(req);
+      if (res.ok && res.type === 'basic') cache.put(url.pathname, res.clone()).catch(() => {});
       return res;
     }));
     return;
   }
-  if (url.origin !== location.origin) return;
 
   // Archivos de la app: responde desde caché y actualiza en segundo plano.
   e.respondWith(caches.open(VERSION).then(async cache => {

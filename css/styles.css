@@ -106,6 +106,7 @@ svg { width: 22px; height: 22px; flex: none; }
   font-size: 14px; margin: 24px 4px 0;
 }
 .setting input { width: 20px; height: 20px; accent-color: var(--primary); flex: none; }
+.app-version { text-align: center; color: var(--muted); font-size: 12px; margin: 28px 8px 0; }
 .search-box {
   display: flex; align-items: center; gap: 8px; margin-bottom: 12px; padding: 0 12px;
   background: var(--surface); border: 1px solid var(--line); border-radius: 999px; color: var(--muted);

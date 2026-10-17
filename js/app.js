@@ -158,6 +158,15 @@ async function plainCanvas(page, src) {
   return c;
 }
 
+// Guarda la página sobre su registro actual: respeta el documento al que pertenece ahora (por si se
+// movió o se unió a otro mientras se procesaba) y no revive una página que se borró en el intermedio.
+// Devuelve false si la página ya no existe.
+async function savePage(page) {
+  const saved = await db.updatePage(page.id, (rec) => { Object.assign(rec, page, { docId: rec.docId }); });
+  if (saved) page.docId = saved.docId;
+  return !!saved;
+}
+
 // Genera la imagen final y la miniatura de una página.
 async function renderPage(page, src) {
   const c = await plainCanvas(page, src);
@@ -168,7 +177,7 @@ async function renderPage(page, src) {
   page.width = c.width;
   page.height = c.height;
   page.thumb = await canvasToBlob(drawScaled(c, c.width, c.height, 360), 'image/jpeg', 0.75);
-  await db.putPage(page);
+  if (!await savePage(page)) return page; // se borró mientras se procesaba
   // Si se procesó una copia leída de la base (p. ej. al enderezar en segundo plano) y ese
   // documento está abierto, se actualiza también la copia en pantalla.
   const live = state.pages.find(p => p.id === page.id);
@@ -213,8 +222,10 @@ function nextIndex(doc) {
   return state.insertAt++;
 }
 
-async function addPage(originalCanvas, corners, { filter, source } = {}) {
-  const doc = await ensureDoc();
+// doc: documento al que va la página (por defecto, el abierto). Si mientras tanto se salió de él (por
+// ejemplo, a mitad de una importación larga), la página se agrega igual a ese documento, al final.
+async function addPage(originalCanvas, corners, { filter, source, doc: target } = {}) {
+  const doc = target || await ensureDoc();
   const original = await canvasToBlob(originalCanvas, 'image/jpeg', 0.92);
   const page = {
     id: db.uid(),
@@ -229,11 +240,19 @@ async function addPage(originalCanvas, corners, { filter, source } = {}) {
     ...(source ? { source } : {}),
   };
   await db.putPage(page);
-  const at = nextIndex(doc);
-  doc.pageIds.splice(at, 0, page.id);
-  state.pages.splice(at, 0, page);
+  if (state.doc && state.doc.id === doc.id) {
+    const live = state.doc;
+    const at = nextIndex(live);
+    live.pageIds.splice(at, 0, page.id);
+    state.pages.splice(at, 0, page);
+    await db.putDoc(live);
+  } else if (await db.updateDoc(doc.id, (d) => { d.pageIds.push(page.id); })) {
+    if (state.view === 'home') renderHome();
+  } else {
+    await db.deletePage(page.id); // el documento se borró mientras tanto
+    return null;
+  }
   state.lastAdded = page;
-  await db.putDoc(doc);
   const data = getData(originalCanvas);
   enqueue(() => renderPage(page, data));
   return page;
@@ -254,7 +273,8 @@ async function importFiles(files) {
   }
   toast(usable.length > 1 ? `Importando ${usable.length} archivos…` : 'Importando…');
   state.importing = true; // al salir de la cámara para importar, no se cierra la inserción
-  await ensureDoc();
+  const created = !state.doc;
+  const target = await ensureDoc();
   if (state.view === 'camera') {
     if (state.cameraFrom === 'doc') history.back(); else openDocView('replace');
   } else if (state.view !== 'doc') {
@@ -265,24 +285,29 @@ async function importFiles(files) {
     try {
       if (isPdf(f)) {
         // Un documento nuevo hecho con un PDF se llama como el archivo.
-        const doc = state.doc;
-        if (doc.autoName && !doc.pageIds.length) {
-          const name = (f.name || '').replace(/\.pdf$/i, '').replace(/[_]+/g, ' ').trim();
-          if (name) { doc.name = name; doc.autoName = false; await db.putDoc(doc); renderDoc(); }
+        const name = (f.name || '').replace(/\.pdf$/i, '').replace(/[_]+/g, ' ').trim();
+        if (created && !added && name) {
+          const saved = await db.updateDoc(target.id, (d) => {
+            if (!d.autoName || d.pageIds.length) return false;
+            d.name = name;
+            d.autoName = false;
+          });
+          if (saved && state.doc && state.doc.id === saved.id) {
+            Object.assign(state.doc, { name: saved.name, autoName: false });
+            renderDoc();
+          }
         }
         // Las páginas de un PDF ya están derechas y limpias: sin recorte ni filtro.
         await renderPdf(f, PDF_MAX_SIDE, async (canvas, n, total) => {
           if (total > 1) toast(`Importando PDF: página ${n} de ${total}…`, 4000);
-          await addPage(canvas, FULL_FRAME, { filter: 'original', source: 'pdf' });
-          added++;
+          if (await addPage(canvas, FULL_FRAME, { filter: 'original', source: 'pdf', doc: target })) added++;
           renderDoc();
         }, (wrong) => askPassword(f.name, wrong));
       } else {
         const bmp = await decodeBlob(f);
         const canvas = drawScaled(bmp, bmp.width, bmp.height, MAX_ORIGINAL);
         bmp.close && bmp.close();
-        await addPage(canvas, detectOn(canvas));
-        added++;
+        if (await addPage(canvas, detectOn(canvas), { doc: target })) added++;
         renderDoc();
       }
     } catch (err) {
@@ -291,16 +316,28 @@ async function importFiles(files) {
     }
   }
   state.importing = false;
-  if (state.doc && !state.doc.pageIds.length && state.view === 'doc') {
+  if (created && !added) {
     // No se pudo agregar nada a un documento nuevo: no dejarlo vacío.
-    await db.deleteDoc(state.doc);
-    state.doc = null;
-    state.insertAt = null;
-    return history.back();
+    const open = state.doc && state.doc.id === target.id;
+    const doc = await db.getDoc(target.id);
+    if (doc && !doc.pageIds.length) {
+      await db.deleteDoc(doc);
+      if (open) {
+        state.doc = null;
+        state.insertAt = null;
+        if (state.view === 'doc') return history.back();
+      }
+      if (state.view === 'home') renderHome();
+    }
   }
   const skipped = files.length - usable.length;
   endInsert(added, skipped ? `${skipped} archivo(s) no se agregaron: solo se aceptan imágenes y PDF.` : '');
 }
+
+// Preguntas abiertas (contraseña, elegir documento o firma): al cambiar de pantalla se responden
+// "cancelar", para que lo que estaba esperando la respuesta no quede colgado.
+const prompts = new Set();
+function cancelPrompts() { for (const cancel of [...prompts]) cancel(); }
 
 // Pide la contraseña de un PDF. Devuelve null si se cancela.
 function askPassword(fileName, wrong) {
@@ -312,15 +349,18 @@ function askPassword(fileName, wrong) {
     input.value = '';
     panel.classList.remove('hidden');
     setTimeout(() => input.focus(), 50);
+    const cancel = () => done(null);
     const done = (value) => {
+      prompts.delete(cancel);
       panel.classList.add('hidden');
       $('pass-form').onsubmit = null;
       $('btn-pass-cancel').onclick = null;
       input.value = '';
       resolve(value);
     };
+    prompts.add(cancel);
     $('pass-form').onsubmit = (e) => { e.preventDefault(); done(input.value); };
-    $('btn-pass-cancel').onclick = () => done(null);
+    $('btn-pass-cancel').onclick = cancel;
   });
 }
 
@@ -338,15 +378,18 @@ function endInsert(added, extra = '') {
 // ---------------- Navegación ----------------
 
 function setView(name) {
+  cancelPrompts();
   if (state.view === 'camera' && name !== 'camera') {
     stopCamera();
     if (!state.importing) endInsert(state.capturedThisSession);
   }
+  if (state.view === 'edit' && name !== 'edit' && sig.active) endSign(false);
   if (name !== 'doc') state.selected = null;
   state.view = name;
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + name));
   closeExport();
-  ['sheet-menu', 'sheet-pick', 'sheet-insert', 'sheet-text'].forEach(id => $(id).classList.add('hidden'));
+  ['sheet-menu', 'sheet-pick', 'sheet-insert', 'sheet-text', 'sheet-sigs', 'sheet-pad', 'sheet-pass']
+    .forEach(id => $(id).classList.add('hidden'));
   if (textView.busy) { textView.stop = true; ocr.cancel(); }
   bgKick();
 }
@@ -411,7 +454,7 @@ async function renderHome() {
   const docs = await db.listDocs();
   const query = $('search').value.trim();
   const results = query ? search(query, docs, await db.listTexts()) : null;
-  if (seq !== homeSeq) return; // llegó otra búsqueda mientras tanto
+  if (seq !== homeSeq || state.view !== 'home') return; // llegó otra búsqueda o ya se salió del inicio
   revokeAll();
   const list = $('doc-list');
   list.innerHTML = '';
@@ -799,7 +842,9 @@ function pickDoc(title, allowNew) {
     const list = $('pick-list');
     list.innerHTML = '';
     const urls = [];
+    const cancel = () => done(null);
     const done = (v) => {
+      prompts.delete(cancel);
       sheet('sheet-pick', false);
       $('btn-pick-cancel').onclick = null;
       $('sheet-pick').onclick = null;
@@ -838,8 +883,9 @@ function pickDoc(title, allowNew) {
         if (p && p.thumb) { const u = URL.createObjectURL(p.thumb); urls.push(u); img.src = u; }
       });
     }
-    $('btn-pick-cancel').onclick = () => done(null);
+    $('btn-pick-cancel').onclick = cancel;
     $('sheet-pick').onclick = (e) => { if (e.target === e.currentTarget) done(null); };
+    prompts.add(cancel);
     sheet('sheet-pick', true);
   });
 }
@@ -1007,10 +1053,13 @@ function updateAutoBtn() {
 }
 
 let capturing = false;
+let captureDone = Promise.resolve(); // se cumple cuando termina la foto en curso
 async function capture() {
   const video = $('video');
   if (capturing || !stream || !video.videoWidth) return;
   capturing = true;
+  let release;
+  captureDone = new Promise(r => { release = r; });
   $('btn-shutter').classList.add('busy');
   const fx = $('flash-fx');
   fx.classList.add('on');
@@ -1034,6 +1083,7 @@ async function capture() {
   } finally {
     capturing = false;
     $('btn-shutter').classList.remove('busy');
+    release();
   }
 }
 
@@ -1055,13 +1105,14 @@ const idc = { on: false, sides: [], scale: store.get('idScale', 1) };
 const idStep = () => (!idc.on ? '' : idc.sides.length ? 'Ahora la cara de atrás (2 de 2)' : 'Cara frontal de la tarjeta (1 de 2)');
 const aimHint = () => (idc.on ? `${idStep()}: ponla sobre algo oscuro y que se vea completa` : 'Apunta al documento');
 const noEdgeHint = () => (idc.on ? 'No veo la tarjeta: ponla sobre una superficie oscura, sin reflejos' : NO_EDGE_HINT);
+const idSizeLabel = () => (idc.scale > 1 ? 'Ampliada 150 %' : 'Tamaño real');
 
 function setCamMode(mode) {
   idc.on = mode === 'id';
   idc.sides = [];
   document.querySelectorAll('.cam-modes button').forEach(b => b.classList.toggle('selected', b.dataset.mode === mode));
   $('btn-idsize').classList.toggle('hidden', !idc.on);
-  $('btn-idsize').textContent = idc.scale > 1 ? 'Ampliada 150 %' : 'Tamaño real';
+  $('btn-idsize').textContent = idSizeLabel();
   $('cam-hint').textContent = aimHint();
   auto.armed = true;
 }
@@ -1075,7 +1126,7 @@ document.querySelector('.cam-modes').addEventListener('click', (e) => {
 $('btn-idsize').addEventListener('click', () => {
   idc.scale = idc.scale > 1 ? 1 : 1.5;
   store.set('idScale', idc.scale);
-  setCamMode('id');
+  $('btn-idsize').textContent = idSizeLabel();
   toast(idc.scale > 1 ? 'Las caras se ampliarán al 150 % (lo que suelen pedir para trámites)' : 'Las caras quedarán a tamaño real');
 });
 
@@ -1112,15 +1163,23 @@ async function saveIdPage() {
   updateCamThumb();
 }
 
+let finishing = false;
 async function finishCamera() {
-  if (idc.on && idc.sides.length) {
-    // Solo se tomó el frente: se guarda así.
-    await saveIdPage();
-    toast('Se guardó solo la cara frontal.', 3000);
+  if (finishing || state.view !== 'camera') return; // doble toque
+  finishing = true;
+  try {
+    await captureDone; // que termine la foto que se está procesando (p. ej. el reverso de la cédula)
+    if (idc.on && idc.sides.length) {
+      // Solo se tomó el frente: se guarda así.
+      await saveIdPage();
+      toast('Se guardó solo la cara frontal.', 3000);
+    }
+    if (state.cameraFrom === 'doc') history.back();
+    else if (state.capturedThisSession > 0) openDocView('replace');
+    else history.back();
+  } finally {
+    finishing = false;
   }
-  if (state.cameraFrom === 'doc') history.back();
-  else if (state.capturedThisSession > 0) openDocView('replace');
-  else history.back();
 }
 
 $('btn-shutter').addEventListener('click', capture);
@@ -1185,12 +1244,17 @@ function showResult() {
 }
 
 async function loadSource() {
-  if (!edit.source) {
-    const bmp = await decodeBlob(edit.page.original);
-    const full = drawScaled(bmp, edit.page.ow, edit.page.oh, MAX_ORIGINAL);
-    edit.source = getData(full);
-    edit.preview = drawScaled(full, full.width, full.height, 1400);
+  const page = edit.page;
+  if (!edit.source || edit.sourcePage !== page) {
+    const bmp = await decodeBlob(page.original);
+    const full = drawScaled(bmp, page.ow, page.oh, MAX_ORIGINAL);
     bmp.close && bmp.close();
+    const data = getData(full);
+    // Si mientras tanto se abrió otra página, esta foto no se guarda como la del editor.
+    if (edit.page !== page) return data;
+    edit.source = data;
+    edit.preview = drawScaled(full, full.width, full.height, 1400);
+    edit.sourcePage = page;
   }
   return edit.source;
 }
@@ -1251,8 +1315,10 @@ function setCropMode(on) {
 }
 
 $('btn-crop').addEventListener('click', async () => {
+  const page = edit.page;
   $('edit-busy').classList.remove('hidden');
   try { await loadSource(); } finally { $('edit-busy').classList.add('hidden'); }
+  if (edit.page !== page || state.view !== 'edit') return;
   edit.corners = edit.page.corners.map(p => p.slice());
   setCropMode(true);
 });
@@ -1392,6 +1458,7 @@ async function startSign() {
   try {
     // De fondo, la página sin firmas: las firmas se muestran encima para poder moverlas.
     const c = await plainCanvas(page, await loadSource());
+    if (edit.page !== page || state.view !== 'edit') return;
     const img = $('edit-result');
     if (img.src) URL.revokeObjectURL(img.src);
     img.src = URL.createObjectURL(await canvasToBlob(c, 'image/jpeg', 0.85));
@@ -1402,7 +1469,7 @@ async function startSign() {
   } finally {
     busy.classList.add('hidden');
   }
-  if (edit.page !== page) return;
+  if (edit.page !== page || state.view !== 'edit') return;
   sig.active = true;
   sig.marks = (page.marks || []).map(m => ({ ...m }));
   $('edit-tools').classList.add('hidden');
@@ -1553,7 +1620,9 @@ function chooseSignature() {
   return new Promise(async (resolve) => {
     const list = $('sig-list');
     const urls = [];
+    const cancel = () => done(null);
     const done = (blob) => {
+      prompts.delete(cancel);
       sheet('sheet-sigs', false);
       urls.forEach(u => URL.revokeObjectURL(u));
       $('btn-sig-draw').onclick = $('btn-sig-photo').onclick = $('btn-sigs-cancel').onclick = null;
@@ -1593,18 +1662,21 @@ function chooseSignature() {
     };
     await fill();
     $('btn-sig-draw').onclick = async () => {
+      prompts.delete(cancel);
       sheet('sheet-sigs', false);
       const blob = await drawSignature();
       if (blob) await saveSignature(blob);
       done(blob);
     };
     $('btn-sig-photo').onclick = async () => {
+      prompts.delete(cancel);
       sheet('sheet-sigs', false);
       const blob = await photoSignature();
       if (blob) await saveSignature(blob);
       done(blob);
     };
-    $('btn-sigs-cancel').onclick = () => done(null);
+    $('btn-sigs-cancel').onclick = cancel;
+    prompts.add(cancel);
     sheet('sheet-sigs', true);
   });
 }
@@ -1617,15 +1689,18 @@ function drawSignature() {
     document.querySelectorAll('#sig-ink button').forEach(b => b.classList.toggle('selected', b.dataset.ink === ink));
     sheet('sheet-pad', true);
     requestAnimationFrame(() => { pad.resize(); pad.clear(); pad.setColor(INKS[ink]); });
+    const cancel = () => done(false);
     const done = async (ok) => {
       const blob = ok ? await pad.toBlob() : null;
       if (ok && !blob) return toast('Primero firma en el recuadro blanco');
+      prompts.delete(cancel);
       sheet('sheet-pad', false);
       $('btn-pad-ok').onclick = $('btn-pad-cancel').onclick = null;
       resolve(blob);
     };
+    prompts.add(cancel);
     $('btn-pad-ok').onclick = () => done(true);
-    $('btn-pad-cancel').onclick = () => done(false);
+    $('btn-pad-cancel').onclick = cancel;
   });
 }
 $('btn-pad-clear').addEventListener('click', () => pad && pad.clear());
@@ -1727,7 +1802,9 @@ function withOcr(fn) {
 
 // Se puede enderezar sola si nadie la giró a mano y no tiene firmas (ni es una hoja de cédula,
 // con poco texto, donde la orientación es menos segura).
-const canStraighten = (p) => !p.userRotated && !(p.marks && p.marks.length) && p.source !== 'id';
+const canStraighten = (p) => !p.userRotated && !(p.marks && p.marks.length) && p.source !== 'id' &&
+  // ni la que está abierta en el editor (no cambiarla mientras se mira, gira o firma)
+  !(state.view === 'edit' && edit.page && edit.page.id === p.id);
 
 // Guarda el texto leído con la clave con que se leyó (recorte y giro). Si la página cambió en el
 // intermedio, se descarta. Devuelve {page, turned} o null.
@@ -1736,7 +1813,7 @@ async function storeOcr(id, key, res) {
   if (page) {
     if (ocrKey(page) !== key) return null;
     page.ocr = { ...res, key };
-    await db.putPage(page);
+    if (!await savePage(page)) return null;
   } else {
     page = await db.updatePage(id, (rec) => {
       if (ocrKey(rec) !== key) return false;
@@ -1753,7 +1830,7 @@ async function storeOcr(id, key, res) {
     turned = page.ocr.rot;
     page.rotation = (page.rotation + turned) % 4;
     page.ocr = { ...page.ocr, rot: 0, key: ocrKey(page) };
-    await db.putPage(page);
+    if (!await savePage(page)) return null;
     await enqueue(() => renderPage(page));
   }
   await db.putText({ id: page.id, docId: page.docId, text: ocr.ocrText(page.ocr), key: page.ocr.key });
@@ -1927,9 +2004,14 @@ async function openText(scope) {
 
 async function loadText() {
   const scope = textView.scope;
-  const pages = scope === 'page' ? [edit.page] : state.pages.filter(p => p.processed);
+  const pages = (scope === 'page' ? [edit.page] : state.pages).filter(p => p && p.processed);
   $('text-title').textContent = scope === 'page' ? `Texto de la página ${state.editIndex + 1}` : 'Texto del documento';
   const out = $('text-out');
+  if (!pages.length) {
+    out.value = '';
+    $('text-note').textContent = 'Todavía no hay páginas listas para leer.';
+    return;
+  }
   textView.stop = false;
   textView.busy = true;
   $('btn-text-copy').disabled = $('btn-text-share').disabled = true;
@@ -1950,7 +2032,7 @@ async function loadText() {
     }
     if (textView.scope !== scope) return;
     const texts = pages.map(p => ocr.ocrText(p.ocr).trim());
-    out.value = pages.length > 1 ? texts.map((t, i) => `--- Página ${i + 1} ---\n${t}`).join('\n\n') : texts[0];
+    out.value = pages.length > 1 ? texts.map((t, i) => `--- Página ${i + 1} ---\n${t}`).join('\n\n') : texts[0] || '';
     out.placeholder = '';
     const empty = texts.every(t => !t);
     $('text-note').textContent = empty ? 'No encontré texto en ' + (pages.length > 1 ? 'estas páginas.' : 'esta página.')
@@ -2269,6 +2351,9 @@ $('btn-scan-home').addEventListener('click', () => { state.doc = null; state.pag
 $('btn-import-home').addEventListener('click', () => { state.doc = null; state.pages = []; state.insertAt = null; $('file-input').click(); });
 $('file-input').addEventListener('change', (e) => { importFiles([...e.target.files]); e.target.value = ''; });
 $('native-cam-input').addEventListener('change', (e) => { importFiles([...e.target.files]); e.target.value = ''; });
+
+window.addEventListener('scaner-db-closed', () =>
+  toast('La app se actualizó en otra ventana: ciérrala y vuelve a abrirla.', 10000));
 
 $('opt-autostart').checked = store.get('autostart', false);
 $('opt-autostart').addEventListener('change', (e) => store.set('autostart', e.target.checked));
