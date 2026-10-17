@@ -1,5 +1,5 @@
 // Service worker: permite usar la app sin conexión y abrirla al instante.
-const VERSION = 'scaner-v7';
+const VERSION = 'scaner-v8';
 const APP_SHELL = [
   './',
   'index.html',
@@ -34,6 +34,29 @@ self.addEventListener('install', (e) => {
 const VENDOR_CACHE = 'scaner-vendor';
 const VENDOR_CURRENT = /\/vendor\/(tesseract-7\.0\.0|pdfjs-6\.4\.299)\//;
 
+// Huella SHA-256 de cada archivo de código de vendor/ (se generan desde los mismos archivos; ver
+// vendor/README.md). Lo que no coincida no se usa: así nadie puede dejar código alterado guardado.
+const VENDOR_SHA256 = {
+  'vendor/pdfjs-6.4.299/pdf.min.js': 'vMwk6nEduORFA2KVGZBKUpLXO52qohS7583MKCsPQlk=',
+  'vendor/pdfjs-6.4.299/pdf.worker.min.js': 'FF0t06sMhhUQEdupWs+i1TNuKszVk4jqQ9vuDv3arsY=',
+  'vendor/pdfjs-6.4.299/wasm/jbig2.wasm': 'Rm9FwqYaaYFS+1QAwn5W/yzrc9y3H94/w2alAjCOqrA=',
+  'vendor/pdfjs-6.4.299/wasm/jbig2_nowasm_fallback.js': 'aGhs7WJKSMQvhM2qSC7ES3Kw3k3ISg35A68ft7RbXZo=',
+  'vendor/pdfjs-6.4.299/wasm/openjpeg.wasm': 'leUAJZevCCQASqV7GQD+AZcV2zieN2QLHlg5XkLwDMU=',
+  'vendor/pdfjs-6.4.299/wasm/openjpeg_nowasm_fallback.js': 'kEezS2vBQtheSwqhsIsLm6rUxvi3rIdkG56PkOtv0j4=',
+  'vendor/pdfjs-6.4.299/wasm/qcms_bg.wasm': 'Zj2GEm1fX8scYUkPlDU+KoN1ZguMVJirPrq1o0sIgA4=',
+  'vendor/tesseract-7.0.0/core/tesseract-core-lstm.wasm.js': '7vX4svjiDhUGgLIK2uxKYLq6/uOtvoqUWDyB/uRuhoA=',
+  'vendor/tesseract-7.0.0/core/tesseract-core-relaxedsimd-lstm.wasm.js': 'hhpTbPnvjmPLZE1XurOcOI8399a29gAkt0HF9rOaWbM=',
+  'vendor/tesseract-7.0.0/core/tesseract-core-simd-lstm.wasm.js': 'xYtGpMeWwLivzPd1kdW4dbaJa0XUArvOjKpvU2JEezg=',
+  'vendor/tesseract-7.0.0/tesseract.min.js': 'AAwn2c0N72Vfd7NscqOJwKsTeTqjHLTXqrVtCcCvvH4=',
+  'vendor/tesseract-7.0.0/worker.min.js': 'V2t99+M5PhN+UYSTV8mttT/nrBu2m/oGzz1hUg8YLG0=',
+};
+const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+async function intact(res, key) {
+  const want = VENDOR_SHA256[key];
+  if (!want) return true; // datos (idiomas, fuentes, tablas): no son código
+  return b64(await crypto.subtle.digest('SHA-256', await res.clone().arrayBuffer())) === want;
+}
+
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
@@ -57,10 +80,13 @@ self.addEventListener('fetch', (e) => {
   if (VENDOR_CURRENT.test(url.pathname)) {
     if (url.pathname.endsWith('.traineddata.gz')) return;
     e.respondWith(caches.open(VENDOR_CACHE).then(async cache => {
+      const key = url.pathname.slice(url.pathname.indexOf('vendor/'));
       const hit = await cache.match(url.pathname);
-      if (hit) return hit;
-      const res = await fetch(req);
-      if (res.ok && res.type === 'basic') cache.put(url.pathname, res.clone()).catch(() => {});
+      if (hit && await intact(hit, key)) return hit;
+      if (hit) await cache.delete(url.pathname); // alterado: se descarta y se vuelve a pedir
+      const res = await fetch(req, { cache: 'no-cache' });
+      if (!res.ok || res.type !== 'basic' || !await intact(res, key)) return Response.error();
+      cache.put(url.pathname, res.clone()).catch(() => {});
       return res;
     }));
     return;

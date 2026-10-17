@@ -37,9 +37,10 @@ async function hash2B(password, salt, udata) {
   return k.subarray(0, 32);
 }
 
-// Contraseña en UTF-8 (normalizada como pide la norma) y de hasta 127 bytes.
+// Contraseña en UTF-8 y de hasta 127 bytes. Se usa tal como se escribió (NFC): la app no admite los
+// símbolos que la norma transformaría (º, ª, ²…), así la abren igual todos los lectores de PDF.
 function passwordBytes(pw) {
-  let b = enc.encode(String(pw).normalize('NFKC'));
+  let b = enc.encode(String(pw).normalize('NFC'));
   if (b.length > 127) b = b.subarray(0, 127);
   return b;
 }

@@ -86,7 +86,11 @@ en la pantalla de inicio como cualquier app.
   no podría ejecutar código ni enviar tus documentos a otro lado.
 - **Archivos que importas**: los PDF se leen sin ejecutar nada de su contenido (pdf.js sin scripts ni
   generación de código) y todo funciona dentro del aislamiento del navegador.
-- **PDF con contraseña**: cifrado AES de 256 bits (el estándar actual). Usa una contraseña larga.
+- **El código guardado en el teléfono se verifica**: antes de usar el lector de texto o el de PDF, la app
+  comprueba la huella digital de cada archivo; si alguien lo hubiera alterado, no se ejecuta.
+- **PDF con contraseña**: cifrado AES de 256 bits (el estándar actual). La app pide al menos
+  8 caracteres (mejor una frase), no admite símbolos como º o ª (algunos lectores, como Chrome o el de
+  Android, no los aceptarían) y nombra el archivo "Documento protegido.pdf" para no revelar su contenido.
 
 Recomendaciones:
 
@@ -96,6 +100,9 @@ Recomendaciones:
    controle la cuenta de GitHub controla la app.
 3. **Copias de lo importante**: si borras los datos del navegador, desinstalas la app o pierdes el
    teléfono, los documentos se pierden. Exporta en PDF los que necesites conservar.
+4. **No publiques otras páginas en esta misma cuenta de GitHub** (o, si lo haces, que no carguen
+   código de terceros): todas las páginas de `fernandhinoquim-tech.github.io` comparten el mismo
+   espacio de almacenamiento en el navegador.
 
 ## Cómo publicarla (desde el celular, sin PC)
 

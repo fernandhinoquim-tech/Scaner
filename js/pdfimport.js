@@ -30,7 +30,8 @@ export const isPdf = (file) => file.type === 'application/pdf' || /\.pdf$/i.test
 // Recorre las páginas del PDF: onPage(canvas, número, total) por cada una, en orden.
 // maxSide: lado mayor de la imagen de cada página (≈ 250-300 ppp en una hoja carta).
 // askPassword(incorrecta): si el PDF tiene contraseña, la pide (null = no abrirlo).
-export async function renderPdf(file, maxSide, onPage, askPassword) {
+// onOpen(páginas): se llama al abrirlo; si devuelve false, no se importa nada.
+export async function renderPdf(file, maxSide, onPage, askPassword, onOpen) {
   const lib = await loadPdfjs();
   let pdf, task, gaveUp = false;
   try {
@@ -41,9 +42,10 @@ export async function renderPdf(file, maxSide, onPage, askPassword) {
       standardFontDataUrl: BASE + 'standard_fonts/',
       wasmUrl: BASE + 'wasm/',
       iccUrl: BASE + 'iccs/',
-      // Defensa ante PDF maliciosos: nunca generar ni ejecutar código a partir del archivo.
-      isEvalSupported: false,
+      // Defensa ante PDF maliciosos: sin formularios XFA (los scripts de los PDF nunca se ejecutan:
+      // la app no carga el motor de scripts) y sin imágenes gigantes que agoten la memoria.
       enableXfa: false,
+      maxImageSize: 50e6,
     });
     task.onPassword = async (update, reason) => {
       const pw = askPassword ? await askPassword(reason === lib.PasswordResponses.INCORRECT_PASSWORD) : null;
@@ -57,6 +59,7 @@ export async function renderPdf(file, maxSide, onPage, askPassword) {
     throw new PdfImportError('No se pudo abrir el PDF (puede estar dañado).');
   }
   try {
+    if (onOpen && !(await onOpen(pdf.numPages))) return;
     for (let n = 1; n <= pdf.numPages; n++) {
       const page = await pdf.getPage(n);
       const base = page.getViewport({ scale: 1 });

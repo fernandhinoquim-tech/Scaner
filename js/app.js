@@ -186,6 +186,16 @@ async function renderPage(page, src) {
   return page;
 }
 
+// Páginas en la cola de procesamiento, y las que fallaron (no se reintentan solas en esta sesión).
+const pendingRender = new Set();
+const failedRender = new Set();
+function queueRender(page, data) {
+  pendingRender.add(page.id);
+  enqueue(async () => {
+    try { await renderPage(page, data); } catch (err) { failedRender.add(page.id); throw err; }
+  }).finally(() => pendingRender.delete(page.id));
+}
+
 // Cola secuencial para no saturar el teléfono al escanear rápido.
 let queue = Promise.resolve();
 let queued = 0;
@@ -239,6 +249,7 @@ async function addPage(originalCanvas, corners, { filter, source, doc: target } 
     created: Date.now(),
     ...(source ? { source } : {}),
   };
+  pendingRender.add(page.id); // ya cuenta como "en la cola" (renderDoc no debe procesarla de nuevo)
   await db.putPage(page);
   if (state.doc && state.doc.id === doc.id) {
     const live = state.doc;
@@ -249,12 +260,12 @@ async function addPage(originalCanvas, corners, { filter, source, doc: target } 
   } else if (await db.updateDoc(doc.id, (d) => { d.pageIds.push(page.id); })) {
     if (state.view === 'home') renderHome();
   } else {
+    pendingRender.delete(page.id);
     await db.deletePage(page.id); // el documento se borró mientras tanto
     return null;
   }
   state.lastAdded = page;
-  const data = getData(originalCanvas);
-  enqueue(() => renderPage(page, data));
+  queueRender(page, getData(originalCanvas));
   return page;
 }
 
@@ -302,7 +313,8 @@ async function importFiles(files) {
           if (total > 1) toast(`Importando PDF: página ${n} de ${total}…`, 4000);
           if (await addPage(canvas, FULL_FRAME, { filter: 'original', source: 'pdf', doc: target })) added++;
           renderDoc();
-        }, (wrong) => askPassword(f.name, wrong));
+        }, (wrong) => askPassword(f.name, wrong),
+        (n) => n <= 60 || confirm(`"${f.name}" tiene ${n} páginas. Importarlas todas puede tardar varios minutos y ocupar bastante espacio. ¿Continuar?`));
       } else {
         const bmp = await decodeBlob(f);
         const canvas = drawScaled(bmp, bmp.width, bmp.height, MAX_ORIGINAL);
@@ -523,6 +535,8 @@ $('search').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target
 function renderDoc() {
   if (state.view !== 'doc' || !state.doc) return;
   if (drag) { drag.rerender = true; return; } // no rehacer la cuadrícula a mitad de un arrastre
+  // Páginas que quedaron sin procesar (por ejemplo, si se cerró la app mientras se procesaban).
+  for (const p of state.pages) if (!p.processed && !pendingRender.has(p.id) && !failedRender.has(p.id)) queueRender(p);
   revokeAll();
   const doc = state.doc;
   if (document.activeElement !== $('doc-title')) $('doc-title').value = doc.name;
@@ -2145,7 +2159,9 @@ function selectFormat(fmt) {
   if (fmt === 'pdf') {
     note = `Un solo PDF con ${n} ${n === 1 ? 'página' : 'páginas'}.`;
     if ($('opt-ocr').checked) note += ' Con texto buscable: podrás buscar y copiar palabras.' + firstTime;
-    if ($('opt-pass').checked) note += ' Guarda bien la contraseña: sin ella no se podrá abrir el PDF.';
+    if ($('opt-pass').checked) {
+      note += ` Guarda bien la contraseña: sin ella no se podrá abrir el PDF. El archivo se llamará "${PROTECTED_NAME}.pdf" para no revelar su contenido.`;
+    }
   }
   $('export-note').textContent = note;
 }
@@ -2196,6 +2212,19 @@ function progress(frac, label) {
 
 const checkStop = () => { if (exp.stop) throw new ocr.OcrCancelledError('Cancelado'); };
 
+// Contraseña del PDF: suficientemente larga para que no se pueda adivinar probando, y sin símbolos de
+// "compatibilidad" (º, ª, ², ½, espacios especiales…) que unos lectores convierten (º → o) y otros no:
+// con ellos, el PDF no abriría en todos (por ejemplo, en Chrome o el visor de Android).
+function passwordProblem(pw) {
+  if (!pw) return 'Escribe la contraseña para el PDF (o desmarca "Proteger con contraseña").';
+  if ([...pw].length < 8) return 'La contraseña debe tener al menos 8 caracteres (mejor, una frase de varias palabras).';
+  if (pw.normalize('NFKC') !== pw.normalize('NFC')) {
+    return 'La contraseña tiene símbolos como º, ª o ² que algunos lectores de PDF no aceptan: usa letras, números y signos comunes.';
+  }
+  return '';
+}
+const PROTECTED_NAME = 'Documento protegido';
+
 // Devuelve la lista de archivos a entregar: [{name, blob}]
 async function buildFiles() {
   const pages = state.pages.filter(p => p.processed);
@@ -2207,10 +2236,11 @@ async function buildFiles() {
   switch (exp.fmt) {
     case 'pdf': {
       const withText = $('opt-ocr').checked;
-      const password = $('opt-pass').checked ? $('pdf-pass').value : '';
-      if ($('opt-pass').checked && !password) {
+      const password = $('opt-pass').checked ? $('pdf-pass').value.normalize('NFC') : '';
+      const problem = $('opt-pass').checked ? passwordProblem(password) : '';
+      if (problem) {
         $('pdf-pass').focus();
-        throw Object.assign(new Error('Escribe la contraseña para el PDF (o desmarca "Proteger con contraseña").'), { user: true });
+        throw Object.assign(new Error(problem), { user: true });
       }
       if (withText) {
         try {
@@ -2229,7 +2259,8 @@ async function buildFiles() {
       const start = withText ? 0.9 : 0;
       const blob = await ex.buildPdf(pdfPages, { size: $('sel-size').value, quality, title: state.doc.name, textLayer: withText, password },
         f => { checkStop(); progress(start + f * (1 - start), 'Creando PDF'); });
-      return [{ name: base + '.pdf', blob }];
+      // Con contraseña, el nombre del archivo no revela de qué se trata.
+      return [{ name: (password ? PROTECTED_NAME : base) + '.pdf', blob, protected: !!password }];
     }
     case 'jpg': case 'png': case 'webp': {
       const type = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[exp.fmt];
@@ -2328,7 +2359,7 @@ $('btn-export-share').addEventListener('click', async () => {
     return fallback(`Solo se pueden compartir hasta ${MAX_SHARE_FILES} imágenes a la vez.`);
   }
   try {
-    await navigator.share({ files: shareFiles, title: state.doc.name });
+    await navigator.share({ files: shareFiles, title: files.some(f => f.protected) ? PROTECTED_NAME : state.doc.name });
     closeExport();
     if (exp.notice) toast(exp.notice, 8000);
   } catch (err) {
@@ -2384,8 +2415,14 @@ $('btn-install').addEventListener('click', async () => {
 });
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  const hadController = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW', err));
+  // Se instaló una versión nueva mientras la app estaba abierta: se ofrece recargar.
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController) $('update-bar').classList.remove('hidden');
+  });
 }
+$('update-bar').addEventListener('click', () => location.reload());
 db.requestPersistence();
 
 // Arranque

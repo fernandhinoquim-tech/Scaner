@@ -27,9 +27,14 @@ Licencias: tesseract.js y tesseract.js-core, Apache-2.0 (`LICENSE-tesseract.js.m
 `core/LICENSE`); datos de idioma de Tesseract (Google, Apache-2.0; paquete npm MIT); pdf.js,
 Apache-2.0 (`LICENSE`), y sus módulos en `wasm/` con sus propias licencias (`LICENSE_*`).
 
+El service worker (`sw.js`, `VENDOR_SHA256`) comprueba la huella SHA-256 de cada archivo de código
+(`.js` y `.wasm`) antes de guardarlo y cada vez que lo entrega: si no coincide, no se usa. Así, ni una
+copia alterada en el servidor ni una guardada en el teléfono pueden ejecutarse.
+
 Para actualizar una librería: copiar la nueva versión en una carpeta con su número de versión
-(por ejemplo `pdfjs-7.0.0/`), cambiar la ruta en `js/ocr.js` o `js/pdfimport.js` y el patrón
-`VENDOR_CURRENT` de `sw.js`, y borrar la carpeta vieja.
+(por ejemplo `pdfjs-7.0.0/`), cambiar la ruta en `js/ocr.js` o `js/pdfimport.js`, el patrón
+`VENDOR_CURRENT` y las huellas `VENDOR_SHA256` de `sw.js` (SHA-256 en base64 de cada `.js`/`.wasm`),
+y borrar la carpeta vieja.
 
 ## Huellas SHA-256 de los archivos principales
 
