@@ -44,7 +44,7 @@
         <input type="checkbox" id="opt-bgocr">
         <span>Leer el texto de las páginas automáticamente (para buscar, poner nombre y enderezar páginas)</span>
       </label>
-      <p class="app-version">Versión 9 · Tus documentos se guardan solo en este teléfono.</p>
+      <p class="app-version">Versión 10 · Tus documentos se guardan solo en este teléfono.</p>
       <p class="share-app"><button id="btn-share-app-home" class="link-btn" type="button">Compartir la app con otra persona</button></p>
     </main>
     <div class="home-actions">
@@ -93,6 +93,13 @@
       <button id="btn-cam-done" class="btn primary" type="button">Listo</button>
     </div>
     <p id="cam-hint" class="cam-hint">Apunta al documento</p>
+    <div id="cam-warn" class="cam-warn hidden" role="alert">
+      <span id="cam-warn-text"></span>
+      <span class="cam-warn-actions">
+        <button id="btn-warn-retake" class="chip" type="button">Repetir</button>
+        <button id="btn-warn-keep" class="chip dark" type="button">Dejarla</button>
+      </span>
+    </div>
   </section>
 
   <!-- Documento -->

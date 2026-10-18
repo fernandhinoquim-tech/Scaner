@@ -189,6 +189,15 @@ svg { width: 22px; height: 22px; flex: none; }
   text-shadow: 0 1px 3px #000, 0 0 8px #000;
 }
 
+.cam-warn {
+  position: absolute; left: 12px; right: 12px; top: calc(66px + var(--safe-top)); z-index: 2;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 12px;
+  padding: 10px 14px; border-radius: 14px; background: rgba(150, 30, 20, 0.92); color: #fff;
+  font-size: 14px; font-weight: 600; text-align: center;
+}
+.cam-warn-actions { display: flex; gap: 8px; }
+.cam-warn .chip:not(.dark) { background: #fff; color: #000; border-color: #fff; }
+
 /* Documento */
 .doc-info { margin: 10px 16px 0; color: var(--muted); font-size: 14px; }
 .page-grid {
@@ -230,6 +239,10 @@ svg { width: 22px; height: 22px; flex: none; }
 .page-card .num {
   position: absolute; left: 6px; bottom: 6px; background: rgba(0, 0, 0, 0.65); color: #fff;
   border-radius: 6px; font-size: 12px; padding: 2px 7px;
+}
+.page-card .warn {
+  position: absolute; left: 6px; top: 6px; background: #c62828; color: #fff;
+  border-radius: 6px; font-size: 12px; font-weight: 700; padding: 2px 7px;
 }
 .page-card.processing::after {
   content: ""; position: absolute; inset: 0; background: rgba(255, 255, 255, 0.5);

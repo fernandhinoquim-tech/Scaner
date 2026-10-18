@@ -11,13 +11,19 @@ en la pantalla de inicio como cualquier app.
   La detección busca los bordes rectos de la hoja (también por diferencias de color), así que funciona
   con sombras y sobre mesas claras. Si la hoja y la mesa son del mismo blanco, la app avisa y puedes
   ajustar las esquinas después.
+- **Fotos nítidas**: donde el navegador lo permite (Chrome en Android), cada página se toma con la
+  cámara de fotos del teléfono a su resolución completa (no un cuadro del video), y la foto espera a
+  que el teléfono quede quieto después del toque. Si una foto sale **borrosa o movida**, la app avisa
+  al instante y ofrece **Repetirla**; la página queda marcada como *Borrosa* en la lista.
 - **Disparo automático** (botón *Auto*): toma la foto sola cuando la hoja está quieta.
   Ideal para escanear muchas hojas seguidas.
 - **Modo cédula**: en la cámara elige *Cédula*, toma el frente y el reverso de la tarjeta (cédula,
   licencia, carné) y quedan juntos en una hoja carta, a **tamaño real** o **ampliada al 150 %**.
 - **Ilimitado**: sin límite de páginas ni de documentos. Todo se guarda en el propio
   teléfono (nada se sube a internet).
-- **Filtros**: Documento (quita sombras y tintes de luz de color, fondo blanco, conserva fotos y colores), Color, Gris, Blanco y negro, Original.
+- **Filtros**: Documento (quita sombras y tintes de luz de color, fondo blanco, realza las letras
+  —también las grises o de color— sin realzar el grano, conserva fotos y colores), Color, Gris,
+  Blanco y negro (también deja negro el texto gris o de color), Original.
 - **Edición**: ajustar esquinas con lupa, girar, borrar páginas, renombrar documentos.
 - **Ordenar páginas**: mantén presionada una página y arrástrala a su nuevo lugar.
 - **Importar PDF e imágenes**: con *Importar* o *+ Archivos* puedes subir fotos o documentos PDF;

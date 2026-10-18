@@ -1,7 +1,7 @@
 import * as db from './db.js';
 import {
   detectDocument, FULL_FRAME, polyArea, orderCorners, warp, applyFilter, rotate, prepareForOcr, OCR_MAX_SIDE,
-  rotateGray, inkBand,
+  rotateGray, inkBand, blurriness, SHARP_SIZE, BLURRY,
 } from './imgproc.js';
 import * as ex from './export.js';
 import * as ocr from './ocr.js';
@@ -11,8 +11,8 @@ import { createPad, signatureFromPhoto, drawMarks, toView, fromView, INKS } from
 import { composeIdPage, looksLikeCard } from './idcard.js';
 
 const $ = (id) => document.getElementById(id);
-const MAX_ORIGINAL = 3200;   // lado máximo de la foto original guardada
-const MAX_OUTPUT = 2400;     // lado máximo de la página escaneada
+const MAX_ORIGINAL = 4000;   // lado máximo de la foto original guardada
+const MAX_OUTPUT = 3000;     // lado máximo de la página escaneada (~270 ppp en una hoja carta)
 const DETECT_SIZE = 360;     // tamaño de trabajo para detectar bordes al capturar
 const LIVE_SIZE = 240;       // tamaño de trabajo para la detección en vivo
 const LIVE_SIZE_CARD = 300;  // ídem en modo cédula
@@ -107,7 +107,8 @@ try {
     const job = jobs.get(e.data.id);
     if (!job) return;
     jobs.delete(e.data.id);
-    e.data.error ? job.reject(new Error(e.data.error)) : job.resolve(e.data.image);
+    if (e.data.error) job.reject(new Error(e.data.error));
+    else job.resolve('value' in e.data ? e.data.value : e.data.image);
   };
   worker.onerror = () => {
     worker = null;
@@ -141,6 +142,16 @@ async function runOcrPrep(image, corners, rotation) {
     } catch { /* se procesa en el hilo principal */ }
   }
   return prepareForOcr(rotate(warp(image, corners, OCR_MAX_SIDE), rotation));
+}
+
+// Borrosidad de la página recortada (ver blurriness en imgproc.js).
+async function runSharpness(image, corners) {
+  if (worker) {
+    try {
+      return await workerJob({ type: 'sharp', image, corners });
+    } catch { /* se mide en el hilo principal */ }
+  }
+  return blurriness(warp(image, corners, SHARP_SIZE));
 }
 
 async function originalData(page) {
@@ -234,7 +245,7 @@ function nextIndex(doc) {
 
 // doc: documento al que va la página (por defecto, el abierto). Si mientras tanto se salió de él (por
 // ejemplo, a mitad de una importación larga), la página se agrega igual a ese documento, al final.
-async function addPage(originalCanvas, corners, { filter, source, doc: target } = {}) {
+async function addPage(originalCanvas, corners, { filter, source, doc: target, data } = {}) {
   const doc = target || await ensureDoc();
   const original = await canvasToBlob(originalCanvas, 'image/jpeg', 0.92);
   const page = {
@@ -265,7 +276,7 @@ async function addPage(originalCanvas, corners, { filter, source, doc: target } 
     return null;
   }
   state.lastAdded = page;
-  queueRender(page, getData(originalCanvas));
+  queueRender(page, data || getData(originalCanvas));
   return page;
 }
 
@@ -580,13 +591,20 @@ function renderDoc() {
     if (sel) card.setAttribute('aria-checked', String(sel.has(page.id)));
     card.tabIndex = 0;
     const img = document.createElement('img');
-    img.alt = `Página ${i + 1}`;
+    img.alt = `Página ${i + 1}` + (page.blurry ? ' (foto borrosa)' : '');
     img.draggable = false;
     if (page.thumb) img.src = objUrl(page.thumb);
     const num = document.createElement('span');
     num.className = 'num';
     num.textContent = i + 1;
     card.append(img, num);
+    if (page.blurry) {
+      const warn = document.createElement('span');
+      warn.className = 'warn';
+      warn.textContent = 'Borrosa';
+      warn.title = 'La foto salió borrosa: conviene repetirla';
+      card.append(warn);
+    }
     if (sel) {
       const check = document.createElement('span');
       check.className = 'check';
@@ -942,6 +960,8 @@ async function startCamera() {
   if (caps.focusMode && caps.focusMode.includes('continuous')) {
     track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
   }
+  photo.settings = null;
+  window.addEventListener('devicemotion', onMotion);
   liveLoop();
 }
 
@@ -953,6 +973,8 @@ function cameraFailed() {
 function stopCamera() {
   clearTimeout(liveTimer);
   liveTimer = null;
+  window.removeEventListener('devicemotion', onMotion);
+  hideBlurWarning();
   if (stream) stream.getTracks().forEach(t => t.stop());
   stream = null;
   $('video').srcObject = null;
@@ -995,11 +1017,15 @@ function liveLoop() {
       }
       drawOverlay();
       if (found) lastSeen = now;
-      // Consejo si no se ve la hoja hace rato (típico: hoja blanca sobre mesa blanca).
-      if (!auto.on) {
-        $('cam-hint').textContent = found ? idStep() : now - Math.max(started, lastSeen) > 3000 ? noEdgeHint() : aimHint();
+      if (shooting) {
+        $('cam-hint').textContent = 'No muevas el teléfono…';
+      } else {
+        // Consejo si no se ve la hoja hace rato (típico: hoja blanca sobre mesa blanca).
+        if (!auto.on) {
+          $('cam-hint').textContent = found ? idStep() : now - Math.max(started, lastSeen) > 3000 ? noEdgeHint() : aimHint();
+        }
+        autoCapture(found, now);
       }
-      autoCapture(found, now);
     }
     liveTimer = setTimeout(tick, 110);
   };
@@ -1066,47 +1092,269 @@ function updateAutoBtn() {
   b.textContent = auto.on ? 'Auto: SÍ' : 'Auto: NO';
 }
 
-let capturing = false;
-let captureDone = Promise.resolve(); // se cumple cuando termina la foto en curso
-async function capture() {
-  const video = $('video');
-  if (capturing || !stream || !video.videoWidth) return;
-  capturing = true;
-  let release;
-  captureDone = new Promise(r => { release = r; });
-  $('btn-shutter').classList.add('busy');
+// ---- Foto nítida: con el teléfono quieto y a la resolución completa de la cámara ----
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Giroscopio: cuándo fue el último movimiento brusco (como el pulso del dedo al tocar el botón).
+const motion = { seen: false, last: 0 };
+function onMotion(e) {
+  const r = e.rotationRate;
+  if (!r || r.alpha == null) return;
+  motion.seen = true;
+  if (Math.hypot(r.alpha, r.beta || 0, r.gamma || 0) > 12) motion.last = performance.now(); // grados/s
+}
+
+// Espera a que el teléfono quede quieto (como mucho 0,8 s). Sin giroscopio no espera.
+async function holdStill() {
+  const start = performance.now();
+  await sleep(60); // que llegue el movimiento del toque
+  while (motion.seen && performance.now() - motion.last < 150 && performance.now() - start < 800) await sleep(30);
+}
+
+// Dibuja una imagen girada k cuartos de vuelta, limitada a maxSide.
+function drawRotated(src, sw, sh, k, maxSide) {
+  const s = Math.min(1, maxSide / Math.max(sw, sh));
+  const w = Math.max(1, Math.round(sw * s)), h = Math.max(1, Math.round(sh * s));
+  const c = makeCanvas(k % 2 ? h : w, k % 2 ? w : h);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.translate(c.width / 2, c.height / 2);
+  ctx.rotate(k * Math.PI / 2);
+  ctx.drawImage(src, -w / 2, -h / 2, w, h);
+  return c;
+}
+
+// Miniatura en gris (48 px de alto) del centro de una imagen, con la proporción ar = ancho / alto.
+function grayThumb(src, ar) {
+  const th = 48, tw = Math.round(th * ar);
+  const cw = Math.min(src.width, src.height * ar), ch = cw / ar;
+  const c = makeCanvas(tw, th);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(src, (src.width - cw) / 2, (src.height - ch) / 2, cw, ch, 0, 0, tw, th);
+  const d = ctx.getImageData(0, 0, tw, th).data;
+  const g = new Float32Array(tw * th);
+  for (let i = 0; i < g.length; i++) g[i] = d[i * 4] * 0.3 + d[i * 4 + 1] * 0.59 + d[i * 4 + 2] * 0.11;
+  return g;
+}
+
+// Parecido entre dos miniaturas (correlación: 1 = iguales).
+function likeness(a, b) {
+  const n = a.length;
+  let ma = 0, mb = 0;
+  for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; }
+  ma /= n; mb /= n;
+  let sab = 0, saa = 0, sbb = 0;
+  for (let i = 0; i < n; i++) {
+    const x = a[i] - ma, y = b[i] - mb;
+    sab += x * y; saa += x * x; sbb += y * y;
+  }
+  return saa && sbb ? sab / Math.sqrt(saa * sbb) : 0;
+}
+
+// Según el teléfono, la foto puede venir girada respecto de lo que muestra la pantalla: se compara
+// en miniatura con el cuadro del video y se gira como corresponda. null si no se parece a lo que se ve.
+function uprightLike(bmp, video) {
+  const ar = video.videoWidth / video.videoHeight;
+  const ref = grayThumb(drawScaled(video, video.videoWidth, video.videoHeight, 160), ar);
+  const portrait = video.videoHeight > video.videoWidth;
+  let best = -1, bestK = 0, zero = -1;
+  for (let k = 0; k < 4; k++) {
+    const turned = k % 2 ? bmp.width > bmp.height : bmp.height > bmp.width;
+    if (turned !== portrait && bmp.width !== bmp.height) continue; // orientación distinta a la pantalla
+    const score = likeness(ref, grayThumb(drawRotated(bmp, bmp.width, bmp.height, k, 160), ar));
+    if (k === 0) zero = score;
+    if (score > best) { best = score; bestK = k; }
+  }
+  if (best < 0.4) return null;
+  if (zero >= 0 && best - zero < 0.1) bestK = 0; // sin una diferencia clara, tal como vino
+  return drawRotated(bmp, bmp.width, bmp.height, bestK, MAX_ORIGINAL);
+}
+
+// Cámara de fotos del teléfono (ImageCapture): toda la resolución del sensor, con su enfoque y su
+// procesamiento; mucho más nítida que un cuadro del video. Donde no existe (iPhone), con el flash
+// encendido (algunos teléfonos lo apagan para la foto) o si falla, se usa el cuadro del video.
+const photo = { broken: false, misses: 0, settings: null };
+
+async function photoSettings(ic) {
+  const opts = {};
+  try {
+    const caps = await ic.getPhotoCapabilities();
+    // Sin destello: el reflejo tapa el texto. Para poca luz está el botón Flash (luz fija).
+    if (caps.fillLightMode && caps.fillLightMode.includes('off')) opts.fillLightMode = 'off';
+    // Sensores enormes (50 MP o más): ~12 MP sobran para una hoja y no agotan la memoria.
+    const w = caps.imageWidth && caps.imageWidth.max, h = caps.imageHeight && caps.imageHeight.max;
+    if (w && h && w * h > 16e6) {
+      const k = Math.sqrt(12e6 / (w * h));
+      opts.imageWidth = Math.round(w * k);
+      opts.imageHeight = Math.round(h * k);
+    }
+  } catch { /* se usan los valores de la cámara */ }
+  return opts;
+}
+
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, reject) =>
+  setTimeout(() => reject(new DOMException('La cámara no respondió', 'TimeoutError')), ms))]);
+
+async function takePhoto(track) {
+  const ic = new ImageCapture(track);
+  if (!photo.settings) photo.settings = await photoSettings(ic);
+  try {
+    return await withTimeout(ic.takePhoto(photo.settings), 4000);
+  } catch (err) {
+    if (err.name === 'TimeoutError' || !Object.keys(photo.settings).length) throw err;
+    photo.settings = {}; // no aceptó lo pedido: otra vez, con lo que use la cámara
+    return withTimeout(ic.takePhoto(), 4000);
+  }
+}
+
+// Devuelve { canvas, photo } o null si la cámara se cerró mientras tanto.
+async function takeShot(video) {
+  const track = stream && stream.getVideoTracks()[0];
+  if (!photo.broken && track && typeof ImageCapture === 'function' && $('btn-torch').getAttribute('aria-pressed') !== 'true') {
+    try {
+      const bmp = await decodeBlob(await takePhoto(track));
+      try {
+        const canvas = uprightLike(bmp, video);
+        if (canvas) { photo.misses = 0; return { canvas, photo: true }; }
+        if (++photo.misses >= 2) photo.broken = true; // dos veces seguidas no coincidió con lo que se ve
+      } finally {
+        bmp.close && bmp.close();
+      }
+    } catch (err) {
+      if (!stream || track.readyState !== 'live') return null; // se cerró la cámara
+      console.warn('No se pudo usar la cámara de fotos:', err);
+      photo.broken = true;
+    }
+  }
+  if (!stream || !video.videoWidth) return null;
+  return { canvas: drawScaled(video, video.videoWidth, video.videoHeight, MAX_ORIGINAL), photo: false };
+}
+
+function shutterFeedback() {
   const fx = $('flash-fx');
   fx.classList.add('on');
   requestAnimationFrame(() => requestAnimationFrame(() => fx.classList.remove('on')));
   if (navigator.vibrate) navigator.vibrate(30);
+}
+
+let capturing = false;
+let shooting = false; // esperando que el teléfono quede quieto o tomando la foto
+let captureDone = Promise.resolve(); // se cumple cuando termina la foto en curso
+async function capture() {
+  const video = $('video');
+  if (capturing || !stream || !video.videoWidth) return;
+  capturing = shooting = true;
+  let release;
+  captureDone = new Promise(r => { release = r; });
+  $('btn-shutter').classList.add('busy');
+  hideBlurWarning();
+  $('cam-hint').textContent = 'No muevas el teléfono…';
   try {
-    const canvas = drawScaled(video, video.videoWidth, video.videoHeight, MAX_ORIGINAL);
+    await holdStill();
+    const live = liveCorners && performance.now() - liveAt < 600 ? liveCorners : null;
+    const shot = stream && await takeShot(video);
+    shooting = false;
+    if (!shot) return;
+    shutterFeedback();
+    const canvas = shot.canvas;
     let corners = detectOn(canvas, { card: idc.on });
-    if (!corners && liveCorners && performance.now() - liveAt < 600) corners = liveCorners;
+    // Lo detectado en vivo vale para el mismo cuadro del video (la foto puede abarcar más o menos).
+    if (!corners && !shot.photo) corners = live;
     if (idc.on) return await captureCard(canvas, corners);
     if (!corners && !state.warnedNoEdges) {
       state.warnedNoEdges = true;
       toast('No encontré los bordes de la hoja: se guardó la foto completa. Toca la página después y usa Recortar.', 6000);
     }
-    await addPage(canvas, corners);
+    const data = getData(canvas);
+    // Se mide antes de agregarla, para que el aviso llegue enseguida (antes de procesarla).
+    const sharp = corners ? runSharpness(data, corners).catch(() => 0) : null;
+    const page = await addPage(canvas, corners, { data });
     state.capturedThisSession++;
     updateCamThumb();
+    if (page && sharp) checkSharp(page, sharp);
   } catch (err) {
     console.error(err);
     toast('No se pudo capturar: ' + err.message);
   } finally {
-    capturing = false;
+    capturing = shooting = false;
     $('btn-shutter').classList.remove('busy');
     release();
   }
 }
+
+// ---- Aviso de foto borrosa ----
+// La página queda marcada (se ve en la lista) y, con la cámara abierta, se ofrece repetirla.
+const blurWarn = { page: null, timer: 0 };
+
+async function checkSharp(page, pending) {
+  const value = await pending;
+  if (!(value > BLURRY)) return;
+  const saved = await db.updatePage(page.id, (rec) => { rec.blurry = true; });
+  if (!saved) return; // se borró mientras tanto
+  page.blurry = true;
+  const live = state.pages.find(p => p.id === page.id);
+  if (live) live.blurry = true;
+  const n = state.doc && state.doc.id === saved.docId ? state.doc.pageIds.indexOf(page.id) + 1 : 0;
+  if (state.view === 'camera') {
+    // Repetir solo si es la última foto (si ya se tomó otra, se revisa al terminar).
+    const last = page === state.lastAdded && !capturing;
+    $('cam-warn-text').textContent = last ? 'La foto salió borrosa.' : `La página ${n} salió borrosa: revísala al terminar.`;
+    $('btn-warn-retake').classList.toggle('hidden', !last);
+    blurWarn.page = last ? page : null;
+    $('cam-warn').classList.remove('hidden');
+    clearTimeout(blurWarn.timer);
+    blurWarn.timer = setTimeout(hideBlurWarning, last ? 15000 : 6000);
+  } else if (n && state.view === 'doc') {
+    renderDoc();
+    toast(`La página ${n} salió borrosa: conviene repetirla.`, 4000);
+  }
+}
+
+function hideBlurWarning() {
+  clearTimeout(blurWarn.timer);
+  blurWarn.page = null;
+  $('cam-warn').classList.add('hidden');
+}
+
+$('btn-warn-keep').addEventListener('click', hideBlurWarning);
+$('btn-warn-retake').addEventListener('click', async () => {
+  const page = blurWarn.page;
+  hideBlurWarning();
+  if (!page || page !== state.lastAdded || capturing) return;
+  state.lastAdded = null;
+  const doc = state.doc && state.doc.id === page.docId ? state.doc : null;
+  if (doc) {
+    state.pages = state.pages.filter(p => p.id !== page.id);
+    doc.pageIds = doc.pageIds.filter(id => id !== page.id);
+  }
+  if (doc && !doc.pageIds.length && state.cameraFrom === 'home') {
+    // Era la única página de un documento nuevo: no dejarlo vacío.
+    await db.deleteDoc({ ...doc, pageIds: [page.id] });
+    state.doc = null;
+    state.pages = [];
+  } else {
+    if (doc) await db.putDoc(doc);
+    else await db.updateDoc(page.docId, (d) => { d.pageIds = d.pageIds.filter(id => id !== page.id); });
+    await db.deletePage(page.id);
+  }
+  // La nueva foto va en el mismo lugar.
+  if (state.insertAt != null) state.insertAt--;
+  state.capturedThisSession = Math.max(0, state.capturedThisSession - 1);
+  auto.armed = true;
+  updateCamThumb();
+  toast('Listo, se borró. Vuelve a tomarla con el teléfono quieto y buena luz.', 3500);
+});
 
 function updateCamThumb(page) {
   const n = state.capturedThisSession;
   $('cam-count').textContent = n;
   $('cam-count').classList.toggle('hidden', n === 0);
   const img = $('cam-thumb-img');
-  if (n === 0) { img.removeAttribute('src'); return; }
+  if (n === 0 || !state.lastAdded) { // sin fotos, o se borró la última (Repetir)
+    if (img.src) URL.revokeObjectURL(img.src);
+    img.removeAttribute('src');
+    return;
+  }
   const last = page || state.lastAdded;
   if (last && last.thumb && last === state.lastAdded) {
     if (img.src) URL.revokeObjectURL(img.src);

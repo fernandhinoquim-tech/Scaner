@@ -13,7 +13,7 @@ export const PAGE_SIZES = {
 };
 
 export const QUALITY = {
-  alta: { maxSide: 2400, q: 0.9 },
+  alta: { maxSide: 3000, q: 0.9 },
   media: { maxSide: 1700, q: 0.75 },
   baja: { maxSide: 1200, q: 0.6 },
 };

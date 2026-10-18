@@ -27,12 +27,17 @@ function boxBlur(src, w, h, r) {
       acc += src[row + Math.min(w - 1, x + r + 1)] - src[row + Math.max(0, x - r)];
     }
   }
-  for (let x = 0; x < w; x++) {
-    let acc = 0;
-    for (let y = -r; y <= r; y++) acc += tmp[Math.min(h - 1, Math.max(0, y)) * w + x];
-    for (let y = 0; y < h; y++) {
-      out[y * w + x] = acc / size;
-      acc += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x];
+  // Vertical, recorriendo por filas (una suma por columna): mucho más rápido que por columnas.
+  const acc = new Float64Array(w);
+  for (let y = -r; y <= r; y++) {
+    const row = Math.min(h - 1, Math.max(0, y)) * w;
+    for (let x = 0; x < w; x++) acc[x] += tmp[row + x];
+  }
+  for (let y = 0; y < h; y++) {
+    const o = y * w, add = Math.min(h - 1, y + r + 1) * w, sub = Math.max(0, y - r) * w;
+    for (let x = 0; x < w; x++) {
+      out[o + x] = acc[x] / size;
+      acc[x] += tmp[add + x] - tmp[sub + x];
     }
   }
   return out;
@@ -802,14 +807,55 @@ function normalizeBackground(img) {
   return img;
 }
 
+// Realce de letras sin realzar el grano: en cada zona se mide el ruido típico de la foto (cuánto se
+// aparta cada píxel de su entorno; en las sombras aclaradas es mayor) y solo los bordes que lo
+// superan se acentúan; lo menor (grano del papel o del sensor) se suaviza. Recupera letras finas o
+// claras que una foto un poco blanda deja grises, sin llenar el papel de puntos.
+function sharpenText(img) {
+  const { data: d, width: w, height: h } = img;
+  const g = toGray(img);
+  const b = boxBlur(g, w, h, Math.max(1, Math.round(Math.max(w, h) / 1000)));
+  // Ruido por bloques: percentil 25 de |píxel − entorno| (casi no cambia con la cantidad de texto).
+  const bs = Math.max(16, Math.round(Math.max(w, h) / 28));
+  const gw = Math.ceil(w / bs), gh = Math.ceil(h / bs);
+  const noise = new Float32Array(gw * gh);
+  const hist = new Uint32Array(256);
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < gw; gx++) {
+      hist.fill(0);
+      let n = 0;
+      for (let y = gy * bs; y < Math.min(h, gy * bs + bs); y += 2) {
+        for (let x = gx * bs, p = y * w + x; x < Math.min(w, gx * bs + bs); x += 2, p += 2) { hist[Math.abs(g[p] - b[p])]++; n++; }
+      }
+      let acc = 0, q = 0;
+      while (q < 255 && acc + hist[q] < n / 4) acc += hist[q++];
+      noise[gy * gw + gx] = q + (n / 4 - acc) / Math.max(1, hist[q]);
+    }
+  }
+  const T = gridFilter(gridFilter(noise, gw, gh, true), gw, gh, false);
+  const at = gridSampler(gw, gh, bs, w), row = new Float32Array(gw);
+  for (let y = 0, p = 0, i = 0; y < h; y++) {
+    const t = at(T, y, row);
+    for (let x = 0; x < w; x++, p++, i += 4) {
+      const k = Math.max(2, 5.3 * t(x)); // 5,3 × p25 ≈ 2,5 × la mediana del ruido
+      const diff = g[p] - b[p];
+      const edge = diff > k ? diff - k : diff < -k ? diff + k : 0;
+      const delta = edge * 2.6 - diff;
+      d[i] += delta; d[i + 1] += delta; d[i + 2] += delta;
+    }
+  }
+  return img;
+}
+
 function docLook(img) {
   normalizeBackground(img);
+  sharpenText(img);
   const d = img.data;
-  // Curva: papel a blanco, texto más oscuro, colores algo más vivos.
+  // Curva: papel a blanco, texto más oscuro (también el gris claro o de color), colores algo más vivos.
   const lut = new Uint8ClampedArray(256);
   for (let i = 0; i < 256; i++) {
-    const v = Math.min(1, Math.max(0, (i - 60) / (235 - 60)));
-    lut[i] = 255 * Math.pow(v, 1.35);
+    const v = Math.min(1, Math.max(0, (i - 50) / (246 - 50)));
+    lut[i] = 255 * Math.pow(v, 1.5);
   }
   for (let i = 0; i < d.length; i += 4) {
     const r = lut[d[i]], g = lut[d[i + 1]], b = lut[d[i + 2]];
@@ -835,17 +881,16 @@ function grayscale(img) {
   return img;
 }
 
+// Blanco y negro a partir del filtro Documento (ya sin sombras y con las letras realzadas): es tinta
+// lo claramente más oscuro que el papel de alrededor, también el texto gris o de color, y todo lo
+// muy oscuro (así un recuadro negro no queda hueco).
 function blackWhite(img) {
-  normalizeBackground(img);
+  docLook(img);
   const { data: d, width: w, height: h } = img;
   const gray = toGray(img);
-  let t = otsu(gray);
-  t = Math.min(205, Math.max(120, t + 15));
-  // Umbral adaptativo local combinado con el global para trazos finos (sin que el grano que
-  // deja una sombra se vuelva puntos negros).
   const local = boxBlur(gray, w, h, Math.max(6, Math.round(Math.max(w, h) / 120)));
   for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
-    const v = gray[p] < t && gray[p] < local[p] - 8 ? 0 : 255;
+    const v = gray[p] < 110 || (gray[p] < 215 && gray[p] < local[p] - 10) ? 0 : 255;
     d[i] = d[i + 1] = d[i + 2] = v;
   }
   return img;
@@ -879,6 +924,57 @@ export function rotate(img, turns) {
     }
   }
   return { data: out, width: ow, height: oh };
+}
+
+// ---------- Nitidez ----------
+// Cuánto se esparcen los bordes de las letras, en píxeles, en la peor de 4 direcciones: en cada
+// bloque con contenido, el contraste dividido por la pendiente más fuerte. Una foto nítida da ~1,3;
+// una desenfocada o movida, bastante más (se esparce en la dirección del movimiento). Se mide sobre
+// la página recortada a SHARP_SIZE de lado. 0 si casi no hay contenido para medir.
+// Calibrado con páginas de prueba (medidas a este tamaño): nítida 1,3-1,6; un poco blanda pero
+// legible ~3; movida 6 px 3,2; desenfocada o movida 12 px 4,3-5,7, donde ya cuesta leer la letra
+// chica. Desde BLURRY conviene repetir la foto.
+export const SHARP_SIZE = 1600;
+export const BLURRY = 3.2;
+export function blurriness(img) {
+  const g = toGray(img);
+  // Si casi no hay bloques con contraste, puede ser que la foto esté tan borrosa que lo perdió: se
+  // mira en bloques más grandes y con menos contraste, siempre que abarquen al menos un 10 % de la
+  // hoja (así una hoja en blanco con una sombra suave no cuenta como borrosa).
+  return edgeWidth(g, img.width, img.height, 32, 50, 6) || edgeWidth(g, img.width, img.height, 64, 25, 0.1);
+}
+
+// minBlocks: cuántos bloques con contenido hacen falta (si es menor que 1, la fracción del total).
+function edgeWidth(g, w, h, B, minContrast, minBlocks) {
+  const n = B * B;
+  const dirs = [[1, 1], [w, 1], [w + 1, Math.SQRT2], [1 - w, Math.SQRT2]]; // [desplazamiento, largo]
+  const widths = dirs.map(() => []);
+  const hist = new Uint32Array(256);
+  let total = 0;
+  const pct = (q) => {
+    let acc = 0;
+    for (let i = 0; i < 256; i++) if ((acc += hist[i]) > n * q) return i;
+    return 255;
+  };
+  for (let by = 1; by + B < h - 1; by += B) {
+    for (let bx = 1; bx + B < w - 1; bx += B) {
+      total++;
+      hist.fill(0);
+      for (let y = by; y < by + B; y++) for (let i = y * w + bx, e = i + B; i < e; i++) hist[g[i]]++;
+      const contrast = pct(0.95) - pct(0.05);
+      if (contrast < minContrast) continue;
+      for (let k = 0; k < 4; k++) {
+        const [off, len] = dirs[k];
+        hist.fill(0);
+        for (let y = by; y < by + B; y++) for (let i = y * w + bx, e = i + B; i < e; i++) hist[Math.abs(g[i + off] - g[i])]++;
+        widths[k].push(contrast * len / Math.max(1, pct(0.97)));
+      }
+    }
+  }
+  if (widths[0].length < Math.max(6, minBlocks < 1 ? minBlocks * total : minBlocks)) return 0;
+  let worst = 0;
+  for (const a of widths) { a.sort((p, q) => p - q); worst = Math.max(worst, a[a.length >> 1]); }
+  return worst;
 }
 
 // ---------- Preparación para OCR ----------
