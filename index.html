@@ -44,7 +44,8 @@
         <input type="checkbox" id="opt-bgocr">
         <span>Leer el texto de las páginas automáticamente (para buscar, poner nombre y enderezar páginas)</span>
       </label>
-      <p class="app-version">Versión 8 · Tus documentos se guardan solo en este teléfono.</p>
+      <p class="app-version">Versión 9 · Tus documentos se guardan solo en este teléfono.</p>
+      <p class="share-app"><button id="btn-share-app-home" class="link-btn" type="button">Compartir la app con otra persona</button></p>
     </main>
     <div class="home-actions">
       <button id="btn-import-home" class="btn secondary" type="button">
@@ -323,6 +324,20 @@
       <div class="sheet-actions">
         <button id="btn-pad-cancel" class="btn secondary" type="button">Cancelar</button>
         <button id="btn-pad-ok" class="btn primary" type="button">Usar firma</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Instalar la app en el celular -->
+  <div id="sheet-install" class="sheet-backdrop hidden">
+    <div class="sheet" role="dialog" aria-labelledby="install-title">
+      <h2 id="install-title">Instalar Scaner en este celular</h2>
+      <p class="export-note">Queda como una app más: con su ícono, sin la barra del navegador y funcionando sin internet.</p>
+      <ol id="install-steps" class="install-steps"></ol>
+      <p id="install-extra" class="export-note"></p>
+      <div class="sheet-actions">
+        <button id="btn-install-close" class="btn secondary" type="button">Cerrar</button>
+        <button id="btn-share-app" class="btn primary" type="button">Compartir la app</button>
       </div>
     </div>
   </div>

@@ -400,7 +400,7 @@ function setView(name) {
   state.view = name;
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + name));
   closeExport();
-  ['sheet-menu', 'sheet-pick', 'sheet-insert', 'sheet-text', 'sheet-sigs', 'sheet-pad', 'sheet-pass']
+  ['sheet-menu', 'sheet-pick', 'sheet-insert', 'sheet-text', 'sheet-sigs', 'sheet-pad', 'sheet-pass', 'sheet-install']
     .forEach(id => $(id).classList.add('hidden'));
   if (textView.busy) { textView.stop = true; ocr.cancel(); }
   bgKick();
@@ -2400,19 +2400,107 @@ $('opt-bgocr').addEventListener('change', (e) => {
   renderHome();
 });
 
+// ---------------- Instalar en el celular ----------------
+// Es una app web instalable: el navegador del teléfono la instala (con ícono, sin barra del navegador
+// y sin internet). Android con Chrome ofrece un diálogo propio; en iPhone y otros navegadores no hay
+// diálogo automático, así que se muestran los pasos exactos.
+
+const APP_URL = new URL('./', location.href).href;
+const isInstalled = () => matchMedia('(display-mode: standalone)').matches ||
+  matchMedia('(display-mode: fullscreen)').matches || navigator.standalone === true;
 let installEvent = null;
+
+// Pasos según el teléfono y el navegador. **texto** se muestra en negrita.
+function installGuide() {
+  const ua = navigator.userAgent;
+  const ios = /iPhone|iPad|iPod/i.test(ua) || (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1);
+  const done = 'Si ya la instalaste, búscala con su ícono en la pantalla de inicio.';
+  if (ios && /CriOS|EdgiOS|FxiOS/i.test(ua)) {
+    return {
+      steps: ['Toca el botón **Compartir** (arriba a la derecha, junto a la dirección).', 'Toca **Agregar a pantalla de inicio**.', 'Toca **Agregar**.'],
+      extra: `Necesita iOS 16.4 o más reciente. Si no ves la opción, abre este mismo enlace en Safari. ${done}`,
+    };
+  }
+  if (ios) {
+    return {
+      steps: ['Toca el botón **Compartir** (el cuadrado con una flecha hacia arriba, abajo en la pantalla).', 'Baja y toca **Agregar a pantalla de inicio**.', 'Toca **Agregar**.'],
+      extra: done,
+    };
+  }
+  if (/Android/i.test(ua)) {
+    if (/SamsungBrowser/i.test(ua)) {
+      return { steps: ['Toca el menú **≡** (abajo a la derecha).', 'Toca **Agregar página a** y luego **Pantalla de inicio**.'],
+        extra: `Si en la barra de direcciones aparece un ícono para instalar, también puedes tocarlo. ${done}` };
+    }
+    if (/Firefox/i.test(ua)) {
+      return { steps: ['Toca el menú **⋮**.', 'Toca **Instalar** (o **Agregar a la pantalla de inicio**).'], extra: done };
+    }
+    if (/EdgA/i.test(ua)) {
+      return { steps: ['Toca el menú **⋯** (abajo).', 'Toca **Agregar al teléfono**.'], extra: done };
+    }
+    return { steps: ['Toca el menú **⋮** (arriba a la derecha).', 'Toca **Instalar aplicación** (o **Agregar a la pantalla principal** y luego **Instalar**).'],
+      extra: `Si no aparece esa opción, actualiza Chrome desde Play Store. ${done}` };
+  }
+  return { steps: [`Abre este enlace en tu celular: **${APP_URL}**`, 'En Android usa Chrome y en iPhone, Safari; ahí aparecerá la opción para instalarla.'], extra: '' };
+}
+
+function richText(el, s) {
+  s.split('**').forEach((part, i) => el.append(i % 2 ? Object.assign(document.createElement('b'), { textContent: part }) : part));
+}
+
+function openInstallGuide() {
+  const { steps, extra } = installGuide();
+  const list = $('install-steps');
+  list.textContent = '';
+  for (const s of steps) { const li = document.createElement('li'); richText(li, s); list.append(li); }
+  $('install-extra').textContent = extra;
+  $('sheet-install').classList.remove('hidden');
+}
+
+// Compartir el enlace para instalarla en otro celular.
+async function shareApp() {
+  const data = { title: 'Scaner', text: 'Escáner de documentos gratis para el celular. Ábrelo y toca «Instalar app»:', url: APP_URL };
+  if (navigator.share) {
+    try { await navigator.share(data); return; } catch (err) { if (err.name === 'AbortError') return; }
+  }
+  try {
+    await navigator.clipboard.writeText(APP_URL);
+    toast('Enlace copiado: pégalo en WhatsApp o donde quieras.', 4000);
+  } catch {
+    toast(APP_URL, 9000);
+  }
+}
+
+$('btn-install').classList.toggle('hidden', isInstalled());
 window.addEventListener('beforeinstallprompt', (e) => {
-  e.preventDefault();
+  e.preventDefault(); // se ofrece con el botón "Instalar app"
   installEvent = e;
-  $('btn-install').classList.remove('hidden');
 });
-$('btn-install').addEventListener('click', async () => {
-  if (!installEvent) return;
-  installEvent.prompt();
-  await installEvent.userChoice;
+window.addEventListener('appinstalled', () => {
   installEvent = null;
   $('btn-install').classList.add('hidden');
+  $('sheet-install').classList.add('hidden');
+  toast('Listo: Scaner quedó instalada. Ábrela desde su ícono.', 5000);
 });
+$('btn-install').addEventListener('click', async () => {
+  if (installEvent) {
+    // Android con Chrome: el diálogo de instalación del propio teléfono (solo se puede usar una vez).
+    const e = installEvent;
+    installEvent = null;
+    e.prompt();
+    if ((await e.userChoice).outcome === 'accepted') return;
+  }
+  openInstallGuide();
+});
+$('btn-install-close').addEventListener('click', () => $('sheet-install').classList.add('hidden'));
+$('sheet-install').addEventListener('click', (e) => { if (e.target === e.currentTarget) $('sheet-install').classList.add('hidden'); });
+$('btn-share-app').addEventListener('click', shareApp);
+$('btn-share-app-home').addEventListener('click', shareApp);
+// La primera vez (sin instalar), un consejo.
+if (!isInstalled() && !store.get('installHint', false)) {
+  store.set('installHint', true);
+  setTimeout(() => { if (state.view === 'home') toast('Consejo: toca «Instalar app» (arriba) para tenerla como una app más en tu celular.', 6000); }, 1500);
+}
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   const hadController = !!navigator.serviceWorker.controller;

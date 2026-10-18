@@ -113,9 +113,19 @@ Recomendaciones:
 
 ## Cómo instalarla en el teléfono
 
-- **Android (Chrome)**: abre el enlace → botón **Instalar app** (o menú ⋮ → *Instalar aplicación*).
+Es una **app web instalable** (PWA): se instala desde el navegador del teléfono, sin tienda, y luego
+funciona como cualquier app: ícono propio, pantalla completa sin barra del navegador, sin internet.
+En Android, Chrome la instala como una app real (aparece en el cajón de aplicaciones y en Ajustes →
+Aplicaciones). La propia app muestra el botón **Instalar app** con los pasos para cada teléfono:
+
+- **Android (Chrome)**: botón **Instalar app** → *Instalar* (o menú ⋮ → *Instalar aplicación*).
   Manteniendo presionado el ícono aparece el atajo **Escanear** que abre directo la cámara.
-- **iPhone (Safari)**: abre el enlace → botón *Compartir* → **Agregar a pantalla de inicio**.
+- **Android (Samsung Internet)**: menú ≡ → *Agregar página a* → *Pantalla de inicio*.
+- **Android (Firefox)**: menú ⋮ → *Instalar*.
+- **iPhone (Safari)**: botón *Compartir* → **Agregar a pantalla de inicio** → *Agregar*.
+  Desde iOS 16.4 también funciona desde Chrome o Edge (botón *Compartir*, arriba).
+
+Para instalarla en otro celular basta con enviarle el enlace (botón **Compartir la app**).
 
 Consejo: activa **"Abrir la cámara al iniciar la app"** en la pantalla principal para que
 al tocar el ícono ya estés listo para escanear.
