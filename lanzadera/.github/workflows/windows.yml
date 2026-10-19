@@ -1,0 +1,92 @@
+name: Compilar para Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Pruebas unitarias
+        run: npm test
+
+      - name: Prueba de humo (abre la app real y toma capturas)
+        id: smoke
+        shell: pwsh
+        timeout-minutes: 12
+        env:
+          LANZADERA_SMOKE: ${{ runner.temp }}\smoke
+          LANZADERA_USER_DATA: ${{ runner.temp }}\userdata
+        run: |
+          $p = Start-Process -FilePath "node_modules\electron\dist\electron.exe" -ArgumentList "." -PassThru -Wait -NoNewWindow
+          $code = $p.ExitCode
+          if (Test-Path "$env:LANZADERA_SMOKE\report.json") { Get-Content "$env:LANZADERA_SMOKE\report.json" }
+          else { Write-Host "No se generó el reporte" }
+          if ($code -ne 0) { Write-Host "::error::La prueba de humo falló (código $code)"; exit 1 }
+
+      - name: Publicar capturas en la rama ci-reports
+        if: always() && github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $dir = "$env:RUNNER_TEMP\smoke"
+          if (!(Test-Path $dir)) { Write-Host "Sin capturas"; exit 0 }
+          "Capturas de la prueba de humo para $env:GITHUB_SHA ($(Get-Date -Format o))" | Out-File "$dir\LEEME.txt" -Encoding utf8
+          Set-Location $dir
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -b ci-reports
+          git add -A
+          git commit -q -m "Capturas de $env:GITHUB_SHA"
+          git push -f -q "https://x-access-token:$env:GH_TOKEN@github.com/$env:GITHUB_REPOSITORY.git" ci-reports
+
+      - name: ¿Hay una versión nueva para publicar?
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V=$(node -p "require('./package.json').version")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ] && ! gh release view "v$V" >/dev/null 2>&1; then
+            echo "publish=always" >> "$GITHUB_OUTPUT"
+            echo "Se publicará la versión v$V"
+          else
+            echo "publish=never" >> "$GITHUB_OUTPUT"
+            echo "La versión v$V ya existe o no es la rama main: solo se compila."
+          fi
+
+      - name: Compilar instalador
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --x64 --publish ${{ steps.version.outputs.publish }}
+
+      - name: Guardar instalador como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lanzadera-${{ steps.version.outputs.version }}-instalador
+          path: dist/*.exe
+          retention-days: 14
