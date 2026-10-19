@@ -59,7 +59,8 @@ export function calendarView() {
     const first = (new Date(y, m, 1).getDay() + 6) % 7;
     const days = new Date(y, m + 1, 0).getDate();
     const prevDays = new Date(y, m, 0).getDate();
-    const title = ref.toLocaleDateString('es', { month: 'long', year: 'numeric' });
+    const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+    const title = cap(ref.toLocaleDateString('es', { month: 'long', year: 'numeric' }));
     const cells = [];
     for (const wd of ['L', 'M', 'X', 'J', 'V', 'S', 'D']) cells.push(`<div class="wd">${wd}</div>`);
     for (let i = 0; i < 42; i++) {
@@ -77,7 +78,7 @@ export function calendarView() {
       if (i >= 34 && d >= days) break;
     }
     const now = today.toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit', hour12: !!S.config.clock.hour12 });
-    const long = today.toLocaleDateString('es', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    const long = cap(today.toLocaleDateString('es', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }));
     box.innerHTML =
       `<div class="cal-now"><div class="big">${esc(now)}</div><div class="sub">${esc(long)}</div></div>` +
       `<div class="cal-top"><span class="cal-title">${esc(title)}</span>` +

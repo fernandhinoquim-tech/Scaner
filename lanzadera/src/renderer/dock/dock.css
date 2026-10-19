@@ -855,7 +855,6 @@ body {
 .cal-title {
   flex: 1;
   font: 600 15px var(--font-display);
-  text-transform: capitalize;
 }
 .cal-grid {
   display: grid;
@@ -897,7 +896,6 @@ body {
 .cal-now .sub {
   color: var(--text-2);
   font-size: 13px;
-  text-transform: capitalize;
 }
 
 .sys {
