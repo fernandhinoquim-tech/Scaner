@@ -1,6 +1,0 @@
-node_modules/
-dist/
-out/
-smoke-out/
-*.log
-.DS_Store
